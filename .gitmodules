@@ -7,6 +7,3 @@
 [submodule "third-party/slang-elab"]
 	path = third-party/slang-elab
 	url = ../../povik/yosys-slang.git
-[submodule "src/chipletpar"]
-	path = src/chipletpar
-	url = https://github.com/liljz250090/ChipletPart_3Dblox.git
