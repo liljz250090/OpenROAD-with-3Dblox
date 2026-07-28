@@ -25,6 +25,7 @@
 #include "ant/MakeAntennaChecker.hh"
 #include "cgt/ClockGating.h"
 #include "cgt/MakeClockGating.h"
+#include "chipletpar/MakeChipletPar.h"
 #include "cts/MakeTritoncts.h"
 #include "cts/TritonCTS.h"
 #include "db_sta/MakeDbSta.hh"
@@ -309,6 +310,7 @@ void OpenRoad::init(Tcl_Interp* tcl_interp,
   psm::initPDNSim(tcl_interp);
   ant::initAntennaChecker(tcl_interp);
   par::initPartitionMgr(tcl_interp);
+  chipletpar::initChipletPar(tcl_interp);
   pdn::initPdnGen(tcl_interp);
   dst::initDistributed(tcl_interp);
   stt::initSteinerTreeBuilder(tcl_interp);
