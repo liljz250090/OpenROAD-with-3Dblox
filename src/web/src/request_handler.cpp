@@ -5,6 +5,7 @@
 
 #include <algorithm>
 #include <any>
+#include <array>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
@@ -16,6 +17,7 @@
 #include <memory>
 #include <mutex>
 #include <set>
+#include <sstream>
 #include <stdexcept>
 #include <string>
 #include <string_view>
@@ -1676,71 +1678,457 @@ WebSocketResponse SelectHandler::handleGet3DData(const WebSocketRequest& req)
       return resp;
     }
 
-    boost::json::object root;
-    boost::json::array chiplets;
-
-    auto processInst = [&](auto& self,
-                           odb::dbChipInst* inst,
-                           int offset_x,
-                           int offset_y,
-                           int offset_z,
-                           const std::string& parent_name) -> void {
-      odb::dbChip* master_chip = inst->getMasterChip();
-      if (master_chip && !master_chip->getChipInsts().empty()) {
-        for (odb::dbChipInst* child : master_chip->getChipInsts()) {
-          odb::Point3D loc = inst->getLoc();
-          self(self,
-               child,
-               offset_x + loc.x(),
-               offset_y + loc.y(),
-               offset_z + loc.z(),
-               parent_name + std::string(inst->getName()) + "/");
-        }
-      } else {
-        boost::json::object obj;
-        obj["name"] = parent_name + std::string(inst->getName());
-
-        odb::Point3D loc = inst->getLoc();
-        obj["x"] = offset_x + loc.x();
-        obj["y"] = offset_y + loc.y();
-        obj["z"] = offset_z + loc.z();
-
-        int w = 0;
-        int h = 0;
-        int thickness = 0;
-        if (master_chip) {
-          w = master_chip->getWidth();
-          h = master_chip->getHeight();
-          thickness = master_chip->getThickness();
-          // Fallback: use block bbox if chip has no explicit dimensions
-          if (w == 0 || h == 0) {
-            if (odb::dbBlock* block = master_chip->getBlock()) {
-              if (odb::dbBox* block_bbox = block->getBBox()) {
-                const odb::Rect bbox = block_bbox->getBox();
-                if (w == 0) {
-                  w = bbox.dx();
-                }
-                if (h == 0) {
-                  h = bbox.dy();
-                }
-              }
-            }
-          }
-        }
-        constexpr int kDefaultChipWidth = 100000;
-        constexpr int kDefaultChipHeight = 100000;
-        constexpr int kDefaultChipThickness = 10000;
-        obj["width"] = w > 0 ? w : kDefaultChipWidth;
-        obj["height"] = h > 0 ? h : kDefaultChipHeight;
-        obj["thickness"] = thickness > 0 ? thickness : kDefaultChipThickness;
-        chiplets.emplace_back(std::move(obj));
+    auto cuboidArray = [](const odb::Cuboid& cuboid) {
+      return boost::json::array{cuboid.xMin(),
+                                cuboid.yMin(),
+                                cuboid.zMin(),
+                                cuboid.xMax(),
+                                cuboid.yMax(),
+                                cuboid.zMax()};
+    };
+    auto rectArray = [](const odb::Rect& rect) {
+      return boost::json::array{
+          rect.xMin(), rect.yMin(), rect.xMax(), rect.yMax()};
+    };
+    auto chipTypeName = [](odb::dbChip::ChipType type) -> const char* {
+      switch (type) {
+        case odb::dbChip::ChipType::DIE:
+          return "die";
+        case odb::dbChip::ChipType::RDL:
+          return "rdl";
+        case odb::dbChip::ChipType::IP:
+          return "ip";
+        case odb::dbChip::ChipType::SUBSTRATE:
+          return "substrate";
+        case odb::dbChip::ChipType::HIER:
+          return "hier";
       }
+      return "unknown";
+    };
+    auto regionSideName = [](odb::dbChipRegion::Side side) -> const char* {
+      switch (side) {
+        case odb::dbChipRegion::Side::FRONT:
+          return "front";
+        case odb::dbChipRegion::Side::BACK:
+          return "back";
+        case odb::dbChipRegion::Side::INTERNAL:
+          return "internal";
+        case odb::dbChipRegion::Side::INTERNAL_EXT:
+          return "internal_ext";
+      }
+      return "unknown";
     };
 
-    for (odb::dbChipInst* inst : chip->getChipInsts()) {
-      processInst(processInst, inst, 0, 0, 0, "");
+    boost::json::object root;
+    const int64_t dbu_per_micron = gen_->getDb()->getDbuPerMicron();
+    odb::dbChip* top_chip = gen_->getDb()->getChip();
+    root["dbu_per_micron"] = dbu_per_micron;
+    boost::json::array chiplets;
+    boost::json::array bumps;
+    boost::json::array tsvs;
+    boost::json::array chip_nets;
+    boost::json::array esc_routes;
+    constexpr size_t kMaxChipNetSegments = 50000;
+    size_t chip_net_segment_count = 0;
+    bool chip_nets_truncated = false;
+
+    const std::vector<ChipletNode>& chiplet_nodes = gen_->chiplets();
+    std::map<std::string, const ChipletNode*> nodes_by_path;
+    for (const ChipletNode& node : chiplet_nodes) {
+      nodes_by_path[node.path] = &node;
     }
+
+    // TileGenerator::chiplets() is the canonical hierarchy walk shared with
+    // the 2D web viewer.  Its world_xfm composes every parent transform,
+    // including R90/R270, MX/MY and MZ, so the 2D and 3D views cannot drift.
+    for (const ChipletNode& node : chiplet_nodes) {
+      if (node.inst == nullptr || node.chip == nullptr) {
+        continue;  // The root is a coordinate system, not an instance.
+      }
+
+      odb::Cuboid local_cuboid = node.chip->getCuboid();
+      // Some legacy ODBs omit dbChip width/height but have a populated block.
+      // Use that real geometry as a fallback; never invent physical sizes.
+      if ((local_cuboid.dx() == 0 || local_cuboid.dy() == 0) && node.block
+          && node.block->getBBox()) {
+        const odb::Rect bbox = node.block->getBBox()->getBox();
+        local_cuboid = odb::Cuboid(bbox.xMin(),
+                                   bbox.yMin(),
+                                   0,
+                                   bbox.xMax(),
+                                   bbox.yMax(),
+                                   node.chip->getThickness());
+      }
+      odb::Cuboid world_cuboid = local_cuboid;
+      node.world_xfm.apply(world_cuboid);
+
+      boost::json::object obj;
+      obj["path"] = node.path;
+      obj["parent"] = node.parent_path;
+      obj["name"] = node.name;
+      obj["master"] = node.chip->getName();
+      obj["type"] = chipTypeName(node.chip->getChipType());
+      obj["depth"] = node.depth;
+      obj["cuboid"] = cuboidArray(world_cuboid);
+      const odb::dbOrientType3D world_orient(node.world_xfm.getOrient(),
+                                             node.world_xfm.isMirrorZ());
+      obj["orient"] = world_orient.getString();
+      obj["mirror_z"] = node.world_xfm.isMirrorZ();
+      obj["has_tsv"] = node.chip->isTsv();
+      obj["render"] = node.chip->getChipType() != odb::dbChip::ChipType::HIER
+                      && world_cuboid.dx() > 0 && world_cuboid.dy() > 0
+                      && world_cuboid.dz() > 0;
+      chiplets.emplace_back(std::move(obj));
+
+      // A dbChipBump is backed by a placed dbInst in the master chip's block.
+      // Transform that instance bbox with the same accumulated world transform
+      // as the chip body.  The region supplies the physical Z plane.
+      std::set<std::array<int, 4>> emitted_tsv_sites;
+      for (odb::dbChipRegionInst* region_inst : node.inst->getRegions()) {
+        if (region_inst == nullptr || region_inst->getChipRegion() == nullptr) {
+          continue;
+        }
+        odb::dbChipRegion* region = region_inst->getChipRegion();
+        odb::Cuboid region_world = region->getCuboid();
+        node.world_xfm.apply(region_world);
+
+        std::string world_side = "internal";
+        if (region->getSide() == odb::dbChipRegion::Side::FRONT
+            || region->getSide() == odb::dbChipRegion::Side::BACK) {
+          const int plane_z = region_world.zCenter();
+          const int to_bottom = std::abs(plane_z - world_cuboid.zMin());
+          const int to_top = std::abs(plane_z - world_cuboid.zMax());
+          world_side = to_top <= to_bottom ? "top" : "bottom";
+        }
+
+        for (odb::dbChipBumpInst* bump_inst : region_inst->getChipBumpInsts()) {
+          if (bump_inst == nullptr || bump_inst->getChipBump() == nullptr) {
+            continue;
+          }
+          odb::dbChipBump* bump = bump_inst->getChipBump();
+          odb::dbInst* bump_db_inst = bump->getInst();
+          if (bump_db_inst == nullptr || bump_db_inst->getBBox() == nullptr) {
+            continue;
+          }
+          odb::Rect bump_world = bump_db_inst->getBBox()->getBox();
+          node.world_xfm.apply(bump_world);
+
+          boost::json::object bump_obj;
+          bump_obj["path"] = node.path + "/" + region->getName() + "/"
+                             + bump_db_inst->getName();
+          bump_obj["chiplet_path"] = node.path;
+          bump_obj["name"] = bump_db_inst->getName();
+          bump_obj["region"] = region->getName();
+          bump_obj["side"] = regionSideName(region->getSide());
+          bump_obj["world_side"] = world_side;
+          bump_obj["shape"] = region->getName().find("pad") != std::string::npos
+                                  ? "pad"
+                                  : "bump";
+          bump_obj["bbox"] = rectArray(bump_world);
+          bump_obj["z"] = region_world.zCenter();
+          if (bump->getNet()) {
+            bump_obj["net"] = bump->getNet()->getName();
+          } else if (bump->getBTerm()) {
+            bump_obj["net"] = bump->getBTerm()->getName();
+          } else {
+            bump_obj["net"] = nullptr;
+          }
+          bumps.emplace_back(std::move(bump_obj));
+
+          // OpenDB currently records TSV presence at chip granularity.  When
+          // that flag is set, the bump sites are the only available physical
+          // XY anchors; visualize a through-chip column at each site.
+          if (node.chip->isTsv()) {
+            const std::array<int, 4> site{bump_world.xMin(),
+                                          bump_world.yMin(),
+                                          bump_world.xMax(),
+                                          bump_world.yMax()};
+            if (!emitted_tsv_sites.insert(site).second) {
+              continue;
+            }
+            boost::json::object tsv_obj;
+            tsv_obj["path"]
+                = node.path + "/tsv/" + std::string(bump_db_inst->getName());
+            tsv_obj["chiplet_path"] = node.path;
+            tsv_obj["name"] = bump_db_inst->getName();
+            tsv_obj["cuboid"] = cuboidArray(odb::Cuboid(bump_world.xMin(),
+                                                        bump_world.yMin(),
+                                                        world_cuboid.zMin(),
+                                                        bump_world.xMax(),
+                                                        bump_world.yMax(),
+                                                        world_cuboid.zMax()));
+            tsvs.emplace_back(std::move(tsv_obj));
+          }
+        }
+      }
+    }
+
+    struct ChipNetEndpoint
+    {
+      std::string chiplet_path;
+      std::string bump_name;
+      std::string chip_type;
+      std::string side;
+      int x = 0;
+      int y = 0;
+      int z = 0;
+    };
+    auto endpoint_for = [&](const ChipletNode& owner,
+                            odb::dbChipBumpInst* bump_inst,
+                            const std::vector<odb::dbChipInst*>& relative_path,
+                            ChipNetEndpoint& endpoint) {
+      if (bump_inst == nullptr || bump_inst->getChipBump() == nullptr) {
+        return false;
+      }
+      std::string path = owner.path;
+      for (odb::dbChipInst* inst : relative_path) {
+        if (inst == nullptr) {
+          return false;
+        }
+        path += "." + std::string(inst->getName());
+      }
+      const auto node_it = nodes_by_path.find(path);
+      if (node_it == nodes_by_path.end()) {
+        return false;
+      }
+      odb::dbChipBump* bump = bump_inst->getChipBump();
+      odb::dbInst* bump_db_inst = bump->getInst();
+      odb::dbChipRegionInst* region_inst = bump_inst->getChipRegionInst();
+      if (bump_db_inst == nullptr || bump_db_inst->getBBox() == nullptr
+          || region_inst == nullptr
+          || region_inst->getChipRegion() == nullptr) {
+        return false;
+      }
+      const ChipletNode& endpoint_node = *node_it->second;
+      odb::Rect bbox = bump_db_inst->getBBox()->getBox();
+      endpoint_node.world_xfm.apply(bbox);
+      odb::Cuboid region = region_inst->getChipRegion()->getCuboid();
+      endpoint_node.world_xfm.apply(region);
+      endpoint.chiplet_path = path;
+      endpoint.bump_name = bump_db_inst->getName();
+      endpoint.chip_type = chipTypeName(endpoint_node.chip->getChipType());
+      endpoint.side = regionSideName(region_inst->getChipRegion()->getSide());
+      endpoint.x = bbox.xCenter();
+      endpoint.y = bbox.yCenter();
+      endpoint.z = region.zCenter();
+      return true;
+    };
+    // dbChipNet is the package-level electrical view: each entry names the
+    // physical bump occurrences participating in one cross-chiplet net.  It
+    // has no detailed router segments, so emit endpoint pairs for the client
+    // to render as an explicit logical interconnect overlay.
+    for (const ChipletNode& owner : chiplet_nodes) {
+      if (owner.chip == nullptr
+          || owner.chip->getChipType() != odb::dbChip::ChipType::HIER) {
+        continue;
+      }
+      for (odb::dbChipNet* chip_net : owner.chip->getChipNets()) {
+        std::vector<ChipNetEndpoint> endpoints;
+        for (uint32_t i = 0; i < chip_net->getNumBumpInsts(); ++i) {
+          std::vector<odb::dbChipInst*> relative_path;
+          odb::dbChipBumpInst* bump_inst
+              = chip_net->getBumpInst(i, relative_path);
+          ChipNetEndpoint endpoint;
+          if (endpoint_for(owner, bump_inst, relative_path, endpoint)) {
+            endpoints.push_back(std::move(endpoint));
+          }
+        }
+        if (endpoints.size() < 2) {
+          continue;
+        }
+        boost::json::object net_obj;
+        net_obj["name"] = chip_net->getName();
+        net_obj["owner_path"] = owner.path;
+        boost::json::array terminals;
+        for (const ChipNetEndpoint& endpoint : endpoints) {
+          terminals.emplace_back(boost::json::object{
+              {"chiplet_path", endpoint.chiplet_path},
+              {"bump", endpoint.bump_name},
+              {"chip_type", endpoint.chip_type},
+              {"side", endpoint.side},
+              {"point",
+               boost::json::array{endpoint.x, endpoint.y, endpoint.z}}});
+        }
+
+        // A chip net can explicitly contain a die bottom bump and its
+        // substrate top bond-bump counterpart.  These two pins are vertically
+        // aligned across a dbChipConn bond interface.  Export those segments
+        // separately so a detailed ESC route does not hide the physical
+        // die-to-substrate bond in the 3D view.
+        boost::json::array bond_segments;
+        for (size_t die_index = 0; die_index < endpoints.size(); ++die_index) {
+          const ChipNetEndpoint& die_endpoint = endpoints[die_index];
+          if (die_endpoint.chip_type != "die" || die_endpoint.side != "back") {
+            continue;
+          }
+          for (size_t substrate_index = 0; substrate_index < endpoints.size();
+               ++substrate_index) {
+            const ChipNetEndpoint& substrate_endpoint
+                = endpoints[substrate_index];
+            if ((substrate_endpoint.chip_type != "substrate"
+                 && substrate_endpoint.chip_type != "rdl")
+                || substrate_endpoint.side != "front"
+                || substrate_endpoint.x != die_endpoint.x
+                || substrate_endpoint.y != die_endpoint.y) {
+              continue;
+            }
+            bond_segments.emplace_back(boost::json::object{
+                {"from", static_cast<int64_t>(die_index)},
+                {"to", static_cast<int64_t>(substrate_index)}});
+            break;
+          }
+        }
+        boost::json::array segments;
+        for (size_t i = 1; i < endpoints.size(); ++i) {
+          if (chip_net_segment_count >= kMaxChipNetSegments) {
+            chip_nets_truncated = true;
+            break;
+          }
+          segments.emplace_back(boost::json::object{{"from", 0}, {"to", i}});
+          ++chip_net_segment_count;
+        }
+        if (!segments.empty()) {
+          net_obj["terminals"] = std::move(terminals);
+          net_obj["segments"] = std::move(segments);
+          if (!bond_segments.empty()) {
+            net_obj["bond_segments"] = std::move(bond_segments);
+          }
+          chip_nets.emplace_back(std::move(net_obj));
+        }
+        if (chip_nets_truncated) {
+          break;
+        }
+      }
+      if (chip_nets_truncated) {
+        break;
+      }
+    }
+
+    // ESC stores its planned package-level polylines as top-chip properties.
+    // The source coordinates are microns; emit DBU points to match every
+    // other 3D payload. The route plane is the package substrate/RDL top
+    // surface, selected using the same chip classification that ESC uses when
+    // materializing a dbWire in its physical block.
+    const ChipletNode* esc_plane = nullptr;
+    for (const ChipletNode& node : chiplet_nodes) {
+      if (node.inst == nullptr || node.chip == nullptr) {
+        continue;
+      }
+      const odb::dbChip::ChipType type = node.chip->getChipType();
+      const std::string& name = node.chip->getName();
+      if (type == odb::dbChip::ChipType::SUBSTRATE
+          || type == odb::dbChip::ChipType::RDL
+          || name.find("Sub") != std::string::npos
+          || name.find("sub") != std::string::npos) {
+        esc_plane = &node;
+        break;
+      }
+    }
+    if (esc_plane != nullptr) {
+      odb::Cuboid plane_cuboid = esc_plane->chip->getCuboid();
+      if ((plane_cuboid.dx() == 0 || plane_cuboid.dy() == 0)
+          && esc_plane->block != nullptr && esc_plane->block->getBBox()) {
+        const odb::Rect bbox = esc_plane->block->getBBox()->getBox();
+        plane_cuboid = odb::Cuboid(bbox.xMin(),
+                                   bbox.yMin(),
+                                   0,
+                                   bbox.xMax(),
+                                   bbox.yMax(),
+                                   esc_plane->chip->getThickness());
+      }
+      esc_plane->world_xfm.apply(plane_cuboid);
+      const int route_z = plane_cuboid.zMax();
+      const std::string route_prefix = "esc_route.";
+      if (top_chip != nullptr) {
+        for (odb::dbProperty* property :
+             odb::dbProperty::getProperties(top_chip)) {
+          const std::string property_name = property->getName();
+          if (property->getType() != odb::dbProperty::STRING_PROP
+              || !property_name.starts_with(route_prefix)) {
+            continue;
+          }
+          odb::dbStringProperty* route_property
+              = odb::dbStringProperty::find(top_chip, property_name.c_str());
+          if (route_property == nullptr) {
+            continue;
+          }
+
+          std::istringstream route_stream(route_property->getValue());
+          boost::json::array points;
+          double x = 0.0;
+          double y = 0.0;
+          while (route_stream >> x >> y) {
+            points.emplace_back(boost::json::array{
+                static_cast<int64_t>(std::llround(x * dbu_per_micron)),
+                static_cast<int64_t>(std::llround(y * dbu_per_micron))});
+          }
+          if (points.size() < 2) {
+            continue;
+          }
+
+          const std::string net_name
+              = property_name.substr(route_prefix.size());
+          boost::json::object route;
+          route["id"] = "esc:" + net_name;
+          route["net"] = net_name;
+          route["plane_path"] = esc_plane->path;
+          route["z"] = route_z;
+          route["points"] = std::move(points);
+          if (odb::dbStringProperty* layer = odb::dbStringProperty::find(
+                  top_chip, ("esc_route_layer." + net_name).c_str())) {
+            route["layer"] = layer->getValue();
+          } else {
+            route["layer"] = "(unspecified)";
+          }
+          if (odb::dbDoubleProperty* width = odb::dbDoubleProperty::find(
+                  top_chip, ("esc_route_width." + net_name).c_str())) {
+            route["width"] = width->getValue();
+          }
+          if (odb::dbDoubleProperty* length = odb::dbDoubleProperty::find(
+                  top_chip, ("esc_route_length." + net_name).c_str())) {
+            route["length"] = length->getValue();
+          }
+          esc_routes.emplace_back(std::move(route));
+        }
+      }
+    }
+
+    // Detailed ESC paths belong to the corresponding package-net overlay.
+    // Replace its endpoint-only dogleg when a dbChipNet exists; retain an
+    // ESC-only entry when older input collateral omitted dbChipNet objects.
+    std::set<std::string> chip_nets_with_esc_route;
+    for (boost::json::value& chip_net_value : chip_nets) {
+      boost::json::object& chip_net = chip_net_value.as_object();
+      const std::string net_name = chip_net.at("name").as_string().c_str();
+      for (const boost::json::value& esc_route_value : esc_routes) {
+        const boost::json::object& esc_route = esc_route_value.as_object();
+        if (net_name == esc_route.at("net").as_string().c_str()) {
+          chip_net["route"] = esc_route;
+          chip_nets_with_esc_route.insert(net_name);
+          break;
+        }
+      }
+    }
+    for (const boost::json::value& esc_route_value : esc_routes) {
+      const boost::json::object& esc_route = esc_route_value.as_object();
+      const std::string net_name = esc_route.at("net").as_string().c_str();
+      if (chip_nets_with_esc_route.contains(net_name)) {
+        continue;
+      }
+      boost::json::object chip_net;
+      chip_net["name"] = net_name;
+      chip_net["owner_path"] = top_chip ? top_chip->getName() : "";
+      chip_net["terminals"] = boost::json::array{};
+      chip_net["segments"] = boost::json::array{};
+      chip_net["route"] = esc_route;
+      chip_nets.emplace_back(std::move(chip_net));
+    }
+
     root["chiplets"] = std::move(chiplets);
+    root["bumps"] = std::move(bumps);
+    root["tsvs"] = std::move(tsvs);
+    root["chip_nets"] = std::move(chip_nets);
+    root["chip_nets_truncated"] = chip_nets_truncated;
     writePayload(resp, root);
   } catch (const std::exception& e) {
     resp.type = WebSocketResponse::kError;

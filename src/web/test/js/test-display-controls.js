@@ -3,7 +3,10 @@
 
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
-import { layerRangeSet } from '../../src/display-controls.js';
+import {
+    layerRangeSet,
+    syncThreeDViewerVisibility,
+} from '../../src/display-controls.js';
 
 // 10 layers: Metal1, Via1, Metal2, Via2, ... Metal5, Via5
 const COUNT = 10;
@@ -57,5 +60,24 @@ describe('layerRangeSet', () => {
     it('range up at last layer returns only last', () => {
         const s = layerRangeSet(9, 0, 1, COUNT);
         assert.deepEqual(s, new Set([9]));
+    });
+});
+
+describe('syncThreeDViewerVisibility', () => {
+    it('notifies an open 3D viewer', () => {
+        let calls = 0;
+        const app = {
+            threeDViewerWidget: {
+                syncVisibility() { calls += 1; },
+            },
+        };
+
+        syncThreeDViewerVisibility(app);
+        assert.equal(calls, 1);
+    });
+
+    it('is safe when the 3D viewer is closed', () => {
+        assert.doesNotThrow(() => syncThreeDViewerVisibility({}));
+        assert.doesNotThrow(() => syncThreeDViewerVisibility(null));
     });
 });

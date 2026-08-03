@@ -104,6 +104,7 @@ const app = {
     // "render every chiplet" (single-chip designs).
     visibleChiplets: null,
     useTrueZ: getCookie('or_use_true_z') === '1',
+    showChipNets: getCookie('or_show_chip_nets') !== '0',
     showDbu: getCookie('or_show_dbu') === '1',
     selectableLayers: new Set(),
     heatMapData: null,

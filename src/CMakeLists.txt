@@ -286,6 +286,7 @@ add_subdirectory(dft)
 add_subdirectory(mpl)
 add_subdirectory(par)
 add_subdirectory(chipletpar)
+add_subdirectory(esc)
 add_subdirectory(est)
 add_subdirectory(syn)
 add_subdirectory(web)
@@ -358,6 +359,7 @@ target_link_libraries(openroad
   mpl
   par
   chipletpar
+  esc_or
   est
   syn
   web

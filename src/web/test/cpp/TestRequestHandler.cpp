@@ -3,6 +3,7 @@
 
 #include <algorithm>
 #include <any>
+#include <array>
 #include <cstdint>
 #include <exception>
 #include <functional>
@@ -22,6 +23,7 @@
 #include "odb/db.h"
 #include "request_handler.h"
 #include "tile_generator.h"
+#include "tst/db_fixture.h"
 #include "tst/nangate45_fixture.h"
 
 namespace web {
@@ -1833,6 +1835,353 @@ TEST_F(SchematicHandlerTest, MuxAndUnknownCellsHaveNoKindHint)
   auto& cell = cells.at("g_mux").as_object();
   EXPECT_EQ(std::string(cell.at("type").as_string()), "MUX2_X1");
   EXPECT_FALSE(cell.contains("gate_kind"));
+}
+
+//------------------------------------------------------------------------------
+// 3D scene tests
+//------------------------------------------------------------------------------
+
+class ThreeDSceneHandlerTest : public tst::DbFixture
+{
+ protected:
+  void SetUp() override
+  {
+    getDb()->setDbuPerMicron(1000);
+    top_ = odb::dbChip::create(
+        getDb(), nullptr, "assembly", odb::dbChip::ChipType::HIER);
+    tech_ = odb::dbTech::create(getDb(), "chip_tech");
+
+    group_ = odb::dbChip::create(
+        getDb(), nullptr, "group", odb::dbChip::ChipType::HIER);
+    die_ = makeChip("compute", odb::dbChip::ChipType::DIE, 100, 200, 30);
+    die_->setTsv(true);
+    substrate_ = makeChip(
+        "substrate", odb::dbChip::ChipType::SUBSTRATE, 1000, 800, 50);
+    rdl_ = makeChip("rdl", odb::dbChip::ChipType::RDL, 900, 700, 5);
+
+    // Give the die one physical bump before instantiating it.
+    // dbChipInst::create then creates the corresponding region/bump instance
+    // objects.
+    odb::dbBlock* block = odb::dbBlock::create(die_, "compute_block");
+    odb::dbLib* lib = odb::dbLib::create(getDb(), "bump_lib", tech_, ',');
+    odb::dbMaster* bump_master = odb::dbMaster::create(lib, "bump_master");
+    bump_master->setWidth(10);
+    bump_master->setHeight(20);
+    bump_master->setType(odb::dbMasterType::CORE);
+    bump_master->setFrozen();
+    odb::dbInst* bump_inst = odb::dbInst::create(block, bump_master, "bump_0");
+    bump_inst->setOrigin(20, 40);
+    bump_inst->setPlacementStatus(odb::dbPlacementStatus::PLACED);
+    odb::dbChipRegion* front = odb::dbChipRegion::create(
+        die_, "front", odb::dbChipRegion::Side::FRONT, nullptr);
+    front->setBox(odb::Rect(0, 0, 100, 200));
+    odb::dbChipBump::create(front, bump_inst);
+
+    group_inst_ = odb::dbChipInst::create(top_, group_, "group_i");
+    group_inst_->setOrient(odb::dbOrientType3D("R90"));
+    group_inst_->setLoc(odb::Point3D(1000, 2000, 300));
+
+    die_inst_ = odb::dbChipInst::create(group_, die_, "die_i");
+    die_inst_->setOrient(odb::dbOrientType3D("MZ_MY_R90"));
+    die_inst_->setLoc(odb::Point3D(100, 200, 50));
+
+    odb::dbChipInst* substrate_inst
+        = odb::dbChipInst::create(top_, substrate_, "substrate_i");
+    substrate_inst->setLoc(odb::Point3D(0, 0, 0));
+    odb::dbChipInst* rdl_inst = odb::dbChipInst::create(top_, rdl_, "rdl_i");
+    rdl_inst->setLoc(odb::Point3D(50, 50, 50));
+  }
+
+  odb::dbChip* makeChip(const char* name,
+                        odb::dbChip::ChipType type,
+                        int width,
+                        int height,
+                        int thickness)
+  {
+    odb::dbChip* chip = odb::dbChip::create(getDb(), tech_, name, type);
+    chip->setWidth(width);
+    chip->setHeight(height);
+    chip->setThickness(thickness);
+    return chip;
+  }
+
+  boost::json::object getScene()
+  {
+    auto generator
+        = std::make_shared<TileGenerator>(getDb(), nullptr, getLogger());
+    auto tcl_eval = std::make_shared<TclEvaluator>(nullptr, getLogger());
+    SelectHandler handler(generator, tcl_eval);
+    WebSocketRequest req;
+    req.id = 101;
+    req.type = WebSocketRequest::kGet3DData;
+    const WebSocketResponse resp = handler.handleGet3DData(req);
+    EXPECT_EQ(resp.type, WebSocketResponse::kJson) << payloadStr(resp);
+    return parseObj(payloadStr(resp));
+  }
+
+  static const boost::json::object* findByString(
+      const boost::json::array& items,
+      const char* key,
+      const std::string& value)
+  {
+    for (const boost::json::value& item : items) {
+      const boost::json::object& obj = item.as_object();
+      if (obj.contains(key) && std::string(obj.at(key).as_string()) == value) {
+        return &obj;
+      }
+    }
+    return nullptr;
+  }
+
+  static void expectCuboid(const boost::json::array& actual,
+                           const odb::Cuboid& expected)
+  {
+    ASSERT_EQ(actual.size(), 6u);
+    EXPECT_EQ(actual[0].as_int64(), expected.xMin());
+    EXPECT_EQ(actual[1].as_int64(), expected.yMin());
+    EXPECT_EQ(actual[2].as_int64(), expected.zMin());
+    EXPECT_EQ(actual[3].as_int64(), expected.xMax());
+    EXPECT_EQ(actual[4].as_int64(), expected.yMax());
+    EXPECT_EQ(actual[5].as_int64(), expected.zMax());
+  }
+
+  odb::dbTech* tech_ = nullptr;
+  odb::dbChip* top_ = nullptr;
+  odb::dbChip* group_ = nullptr;
+  odb::dbChip* die_ = nullptr;
+  odb::dbChip* substrate_ = nullptr;
+  odb::dbChip* rdl_ = nullptr;
+  odb::dbChipInst* group_inst_ = nullptr;
+  odb::dbChipInst* die_inst_ = nullptr;
+};
+
+TEST_F(ThreeDSceneHandlerTest, NestedTransformBumpsAndTypesUseWorldCoordinates)
+{
+  boost::json::object scene = getScene();
+  EXPECT_EQ(scene.at("dbu_per_micron").as_int64(), 1000);
+
+  const boost::json::array& chiplets = scene.at("chiplets").as_array();
+  const boost::json::object* die
+      = findByString(chiplets, "path", "top.group_i.die_i");
+  ASSERT_NE(die, nullptr);
+  EXPECT_EQ(std::string(die->at("parent").as_string()), "top.group_i");
+  EXPECT_EQ(std::string(die->at("type").as_string()), "die");
+  EXPECT_TRUE(die->at("has_tsv").as_bool());
+
+  odb::dbTransform world = die_inst_->getTransform();
+  world.concat(group_inst_->getTransform());
+  odb::Cuboid expected_die = die_->getCuboid();
+  world.apply(expected_die);
+  expectCuboid(die->at("cuboid").as_array(), expected_die);
+  const odb::dbOrientType3D expected_orient(world.getOrient(),
+                                            world.isMirrorZ());
+  EXPECT_EQ(std::string(die->at("orient").as_string()),
+            expected_orient.getString());
+
+  ASSERT_NE(findByString(chiplets, "type", "substrate"), nullptr);
+  ASSERT_NE(findByString(chiplets, "type", "rdl"), nullptr);
+  // The grouping node is retained in the hierarchy but not rendered as a
+  // physical chip body.
+  const boost::json::object* group
+      = findByString(chiplets, "path", "top.group_i");
+  ASSERT_NE(group, nullptr);
+  EXPECT_EQ(std::string(group->at("type").as_string()), "hier");
+  EXPECT_FALSE(group->at("render").as_bool());
+
+  const boost::json::array& bumps = scene.at("bumps").as_array();
+  ASSERT_EQ(bumps.size(), 1u);
+  const boost::json::object& bump = bumps[0].as_object();
+  EXPECT_EQ(std::string(bump.at("chiplet_path").as_string()),
+            "top.group_i.die_i");
+  EXPECT_EQ(std::string(bump.at("world_side").as_string()), "bottom");
+  odb::Rect expected_bump(20, 40, 30, 60);
+  world.apply(expected_bump);
+  const boost::json::array& bump_bbox = bump.at("bbox").as_array();
+  ASSERT_EQ(bump_bbox.size(), 4u);
+  EXPECT_EQ(bump_bbox[0].as_int64(), expected_bump.xMin());
+  EXPECT_EQ(bump_bbox[1].as_int64(), expected_bump.yMin());
+  EXPECT_EQ(bump_bbox[2].as_int64(), expected_bump.xMax());
+  EXPECT_EQ(bump_bbox[3].as_int64(), expected_bump.yMax());
+
+  odb::Cuboid expected_region(0, 0, 30, 100, 200, 30);
+  world.apply(expected_region);
+  EXPECT_EQ(bump.at("z").as_int64(), expected_region.zCenter());
+
+  const boost::json::array& tsvs = scene.at("tsvs").as_array();
+  ASSERT_EQ(tsvs.size(), 1u);
+  odb::Cuboid expected_tsv(expected_bump.xMin(),
+                           expected_bump.yMin(),
+                           expected_die.zMin(),
+                           expected_bump.xMax(),
+                           expected_bump.yMax(),
+                           expected_die.zMax());
+  expectCuboid(tsvs[0].as_object().at("cuboid").as_array(), expected_tsv);
+}
+
+TEST_F(ThreeDSceneHandlerTest, EveryOpenDbOrientationProducesExactCuboid)
+{
+  const std::array<const char*, 16> orientations{"R0",
+                                                 "R90",
+                                                 "R180",
+                                                 "R270",
+                                                 "MX",
+                                                 "MY",
+                                                 "MX_R90",
+                                                 "MY_R90",
+                                                 "MZ",
+                                                 "MZ_R90",
+                                                 "MZ_R180",
+                                                 "MZ_R270",
+                                                 "MZ_MX",
+                                                 "MZ_MY",
+                                                 "MZ_MX_R90",
+                                                 "MZ_MY_R90"};
+
+  std::vector<std::pair<std::string, odb::dbChipInst*>> instances;
+  for (size_t i = 0; i < orientations.size(); ++i) {
+    const std::string name = "orient_" + std::to_string(i);
+    odb::dbChipInst* inst = odb::dbChipInst::create(top_, die_, name);
+    inst->setOrient(odb::dbOrientType3D(orientations[i]));
+    inst->setLoc(odb::Point3D(3000 + static_cast<int>(i) * 300, 4000, 500));
+    instances.emplace_back("top." + name, inst);
+  }
+
+  boost::json::object scene = getScene();
+  const boost::json::array& chiplets = scene.at("chiplets").as_array();
+  for (const auto& [path, inst] : instances) {
+    const boost::json::object* serialized
+        = findByString(chiplets, "path", path);
+    ASSERT_NE(serialized, nullptr) << path;
+    expectCuboid(serialized->at("cuboid").as_array(), inst->getCuboid());
+    EXPECT_EQ(std::string(serialized->at("orient").as_string()),
+              inst->getOrient().getString());
+  }
+}
+
+TEST_F(ThreeDSceneHandlerTest, PackageInterconnectsSerializeChipNet)
+{
+  // A dbChipNet owns bump occurrences through their full hierarchical paths.
+  // Give it one endpoint under group_i and another direct top-level endpoint.
+  odb::dbChipInst* peer = odb::dbChipInst::create(top_, die_, "peer_i");
+  peer->setLoc(odb::Point3D(2500, 500, 80));
+  odb::dbChipBumpInst* nested_bump
+      = *die_inst_->findChipRegionInst("front")->getChipBumpInsts().begin();
+  odb::dbChipBumpInst* peer_bump
+      = *peer->findChipRegionInst("front")->getChipBumpInsts().begin();
+  odb::dbChipNet* package_net = odb::dbChipNet::create(top_, "pkg_data_0");
+  package_net->addBumpInst(nested_bump, {group_inst_, die_inst_});
+  package_net->addBumpInst(peer_bump, {peer});
+
+  boost::json::object scene = getScene();
+  const boost::json::array& chip_nets = scene.at("chip_nets").as_array();
+  const boost::json::object* serialized_net
+      = findByString(chip_nets, "name", "pkg_data_0");
+  ASSERT_NE(serialized_net, nullptr);
+  EXPECT_EQ(serialized_net->at("terminals").as_array().size(), 2u);
+  EXPECT_EQ(serialized_net->at("segments").as_array().size(), 1u);
+
+  std::set<std::string> endpoint_paths;
+  for (const boost::json::value& terminal :
+       serialized_net->at("terminals").as_array()) {
+    endpoint_paths.insert(
+        std::string(terminal.as_object().at("chiplet_path").as_string()));
+  }
+  EXPECT_EQ(endpoint_paths,
+            (std::set<std::string>{"top.group_i.die_i", "top.peer_i"}));
+}
+
+TEST_F(ThreeDSceneHandlerTest, AlignedBondBumpsSerializeBondSegment)
+{
+  odb::dbMaster* bump_master
+      = die_->getBlock()->findInst("bump_0")->getMaster();
+
+  // Create a die bottom bump and two substrate bumps: a top-side bond bump
+  // aligned with the die, plus a bottom-side package bump for the same net.
+  odb::dbChipRegion* die_bottom = odb::dbChipRegion::create(
+      die_, "bond_bottom", odb::dbChipRegion::Side::BACK, nullptr);
+  die_bottom->setBox(odb::Rect(0, 0, 100, 200));
+  odb::dbInst* die_bump_inst
+      = odb::dbInst::create(die_->getBlock(), bump_master, "bond_die");
+  die_bump_inst->setOrigin(20, 40);
+  die_bump_inst->setPlacementStatus(odb::dbPlacementStatus::PLACED);
+  odb::dbChipBump::create(die_bottom, die_bump_inst);
+
+  odb::dbBlock* substrate_block
+      = odb::dbBlock::create(substrate_, "substrate_bond_block");
+  odb::dbChipRegion* substrate_top = odb::dbChipRegion::create(
+      substrate_, "bond_pad", odb::dbChipRegion::Side::FRONT, nullptr);
+  substrate_top->setBox(odb::Rect(0, 0, 1000, 800));
+  odb::dbChipRegion* substrate_bottom = odb::dbChipRegion::create(
+      substrate_, "package_bottom", odb::dbChipRegion::Side::BACK, nullptr);
+  substrate_bottom->setBox(odb::Rect(0, 0, 1000, 800));
+  odb::dbInst* top_bump_inst
+      = odb::dbInst::create(substrate_block, bump_master, "bond_substrate");
+  top_bump_inst->setOrigin(20, 40);
+  top_bump_inst->setPlacementStatus(odb::dbPlacementStatus::PLACED);
+  odb::dbChipBump::create(substrate_top, top_bump_inst);
+  odb::dbInst* package_bump_inst
+      = odb::dbInst::create(substrate_block, bump_master, "package_substrate");
+  package_bump_inst->setOrigin(600, 40);
+  package_bump_inst->setPlacementStatus(odb::dbPlacementStatus::PLACED);
+  odb::dbChipBump::create(substrate_bottom, package_bump_inst);
+
+  odb::dbChipInst* die_inst = odb::dbChipInst::create(top_, die_, "bond_die_i");
+  die_inst->setLoc(odb::Point3D(200, 300, 100));
+  odb::dbChipInst* substrate_inst
+      = odb::dbChipInst::create(top_, substrate_, "bond_substrate_i");
+  substrate_inst->setLoc(odb::Point3D(200, 300, 0));
+
+  odb::dbChipNet* package_net = odb::dbChipNet::create(top_, "bond_net");
+  package_net->addBumpInst(
+      *die_inst->findChipRegionInst("bond_bottom")->getChipBumpInsts().begin(),
+      {die_inst});
+  package_net->addBumpInst(*substrate_inst->findChipRegionInst("bond_pad")
+                                ->getChipBumpInsts()
+                                .begin(),
+                           {substrate_inst});
+  package_net->addBumpInst(*substrate_inst->findChipRegionInst("package_bottom")
+                                ->getChipBumpInsts()
+                                .begin(),
+                           {substrate_inst});
+
+  boost::json::object scene = getScene();
+  const boost::json::object* serialized_net
+      = findByString(scene.at("chip_nets").as_array(), "name", "bond_net");
+  ASSERT_NE(serialized_net, nullptr);
+  ASSERT_TRUE(serialized_net->contains("bond_segments"));
+  EXPECT_EQ(serialized_net->at("terminals").as_array().size(), 3u);
+  EXPECT_EQ(serialized_net->at("bond_segments").as_array().size(), 1u);
+  const boost::json::object* pad
+      = findByString(scene.at("bumps").as_array(), "region", "bond_pad");
+  ASSERT_NE(pad, nullptr);
+  EXPECT_EQ(std::string(pad->at("shape").as_string()), "pad");
+}
+
+TEST_F(ThreeDSceneHandlerTest, EscRoutesSerializeDetailedPackagePolylines)
+{
+  odb::dbStringProperty::create(top_, "esc_route.PKG_ESC", "1 2 3 4 5 6");
+  odb::dbStringProperty::create(top_, "esc_route_layer.PKG_ESC", "RDL1");
+  odb::dbDoubleProperty::create(top_, "esc_route_width.PKG_ESC", 12.5);
+  odb::dbDoubleProperty::create(top_, "esc_route_length.PKG_ESC", 7.25);
+
+  boost::json::object scene = getScene();
+  const boost::json::array& chip_nets = scene.at("chip_nets").as_array();
+  const boost::json::object* chip_net
+      = findByString(chip_nets, "name", "PKG_ESC");
+  ASSERT_NE(chip_net, nullptr);
+  ASSERT_TRUE(chip_net->contains("route"));
+  const boost::json::object& route = chip_net->at("route").as_object();
+  EXPECT_EQ(std::string(route.at("plane_path").as_string()), "top.substrate_i");
+  EXPECT_EQ(std::string(route.at("layer").as_string()), "RDL1");
+  EXPECT_DOUBLE_EQ(route.at("width").as_double(), 12.5);
+  EXPECT_DOUBLE_EQ(route.at("length").as_double(), 7.25);
+
+  const boost::json::array& points = route.at("points").as_array();
+  ASSERT_EQ(points.size(), 3u);
+  EXPECT_EQ(points[0].as_array()[0].as_int64(), 1000);
+  EXPECT_EQ(points[0].as_array()[1].as_int64(), 2000);
+  EXPECT_EQ(points[2].as_array()[0].as_int64(), 5000);
+  EXPECT_EQ(points[2].as_array()[1].as_int64(), 6000);
 }
 
 }  // namespace

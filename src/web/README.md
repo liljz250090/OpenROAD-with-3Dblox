@@ -163,6 +163,17 @@ web_save_report -setup_paths 200 -hold_paths 200 timing.html
   filtering by path group and clock domain.
 - **Clock tree visualization** — Browse clock tree hierarchy, highlight clock
   paths, and view per-level statistics.
+- **3D chiplet visualization** — Render the complete `dbChipInst` hierarchy in
+  world coordinates, including rotations and X/Y/Z mirrors. Chip bodies are
+  styled by type (`DIE`, `IP`, `SUBSTRATE`, and `RDL`), with physical bumps and
+  TSV columns shown when the OpenDB model provides bump sites. Package-level
+  `dbChipNet` bump connectivity is shown as a Manhattan interconnect overlay,
+  controlled by the **Chip Nets** switch.
+  Clicking a chiplet, bump, TSV, or package interconnect opens its local
+  physical properties in the Inspector.
+  Chiplet visibility changes in Display Controls are applied immediately to the
+  3D body, its outline, bumps, TSVs, and interconnects without resetting the
+  camera.
 - **Hierarchy browser** — Navigate the module tree with instance counts and area
   statistics. Toggle visibility and assign colors per module using a 31-color
   palette.

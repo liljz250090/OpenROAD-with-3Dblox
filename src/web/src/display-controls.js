@@ -39,6 +39,16 @@ export function buildChipletFlatNodes(chipletData, savedHidden) {
     });
 }
 
+// Notify the optional 3D panel after the shared chiplet visibility set
+// changes.  Keeping this small adapter here avoids coupling the display
+// controls to Three.js and also handles layouts where the 3D panel is closed.
+export function syncThreeDViewerVisibility(app) {
+    const viewer = app && app.threeDViewerWidget;
+    if (viewer && typeof viewer.syncVisibility === 'function') {
+        viewer.syncVisibility();
+    }
+}
+
 // Fallback color used when the server didn't supply a layer color.
 const fallbackLayerPalette = [
     [70, 130, 210],  // moderate blue
@@ -610,6 +620,7 @@ export function populateDisplayControls(app, visibility, selectability,
                 }
             });
             app.visibleChiplets = newVisible;
+            syncThreeDViewerVisibility(app);
 
             // Persist hidden paths per design.  We re-read the cookie
             // here (rather than mutating a captured copy) so any state
@@ -832,6 +843,11 @@ export function populateDisplayControls(app, visibility, selectability,
         // empty array and accidentally enabling the filter.
         app.visibleChiplets = null;
     }
+
+    // The 3D tab may already have loaded while the initial tech/display data
+    // was still arriving.  Apply the restored cookie state once after the
+    // controls establish app.visibleChiplets.
+    syncThreeDViewerVisibility(app);
 
     // --- Visibility tree (ordered to match Qt GUI display controls) ---
     // Subtrees that opt into a second "selectable" checkbox column mirror

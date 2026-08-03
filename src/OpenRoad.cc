@@ -40,6 +40,7 @@
 #include "drt/TritonRoute.h"
 #include "dst/Distributed.h"
 #include "dst/MakeDistributed.h"
+#include "esc/MakeEsc.h"
 #include "est/EstimateParasitics.h"
 #include "est/MakeEstimateParasitics.h"
 #include "exa/MakeExample.h"
@@ -311,6 +312,7 @@ void OpenRoad::init(Tcl_Interp* tcl_interp,
   ant::initAntennaChecker(tcl_interp);
   par::initPartitionMgr(tcl_interp);
   chipletpar::initChipletPar(tcl_interp);
+  esc::initEsc(tcl_interp);
   pdn::initPdnGen(tcl_interp);
   dst::initDistributed(tcl_interp);
   stt::initSteinerTreeBuilder(tcl_interp);

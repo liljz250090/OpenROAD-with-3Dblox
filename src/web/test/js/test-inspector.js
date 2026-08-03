@@ -112,6 +112,19 @@ describe('Inspector focus nets', () => {
         });
     });
 
+    it('keeps locally generated 3D properties local on refresh', () => {
+        const localData = {
+            local: true,
+            type: '3D Bump',
+            name: 'bump_0',
+            properties: [{ name: 'Object', value: 'Bump' }],
+        };
+        panel.updateInspector(localData);
+        panel.refreshInspector();
+        assert.equal(app._requests.length, 0);
+        assert.match(app.inspectorEl.textContent, /Bump/);
+    });
+
     describe('toggleFocusNet via button click', () => {
         it('adds net to focusNets on focus click', async () => {
             panel.updateInspector(netData('clk'));

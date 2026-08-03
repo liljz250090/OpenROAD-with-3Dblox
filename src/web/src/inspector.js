@@ -632,6 +632,13 @@ export function createInspectorPanel(app, redrawAllLayers, refreshOverlay) {
     // Rulers are client-side so we re-select instead of re-requesting.
     function refreshInspector() {
         if (!lastInspectData) return;
+        // 3D viewer objects (chiplet bodies, bumps, TSVs, and package nets)
+        // are assembled client-side from get_3d_data.  They do not have a
+        // server select_id to re-inspect, so retain their local properties.
+        if (lastInspectData.local) {
+            updateInspector(lastInspectData);
+            return;
+        }
         if (lastInspectData.type === 'Ruler') {
             if (app.rulerManager && app.rulerManager._selectedRulerId !== null) {
                 app.rulerManager._selectRuler(app.rulerManager._selectedRulerId);

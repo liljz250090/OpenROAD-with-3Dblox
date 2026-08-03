@@ -21,6 +21,16 @@ const kStackGapFactor = 0.15;
 const kDrcBlinkIntervalMs = 300;
 const kDrcBlinkToggles = 6;
 const DEG2RAD = Math.PI / 180;
+const BUMP_COLOR = 0xffc107;
+const TSV_COLOR = 0x00e5ff;
+const CHIP_NET_COLORS = [
+  0xff7043, // deep orange
+  0x42a5f5, // blue
+  0x66bb6a, // green
+  0xab47bc, // purple
+  0xffca28, // amber
+  0x26c6da, // cyan
+];
 
 // Distinct color palette for chiplets (saturated, good contrast in 3D)
 const CHIPLET_PALETTE = [
@@ -36,6 +46,28 @@ const CHIPLET_PALETTE = [
   0x3F51B5, // indigo
 ];
 
+const CHIP_TYPE_STYLES = {
+  substrate : {color : 0x607d8b, opacity : 0.72},
+  rdl : {color : 0xff9800, opacity : 0.58},
+  ip : {color : 0x9c27b0, opacity : 0.9},
+};
+
+// New servers provide an already-transformed world-space cuboid.  Keep the
+// legacy scalar fields as a compatibility fallback for saved reports.
+function getWorldCuboid(chiplet) {
+  if (Array.isArray(chiplet.cuboid) && chiplet.cuboid.length >= 6) {
+    return chiplet.cuboid;
+  }
+  return [
+    chiplet.x,
+    chiplet.y,
+    chiplet.z,
+    chiplet.x + chiplet.width,
+    chiplet.y + chiplet.height,
+    chiplet.z + chiplet.thickness,
+  ];
+}
+
 // For each chiplet, compute an integer stacking slot so chiplets sharing the
 // same z that overlap in XY are visually separated. Greedy lowest-slot fit:
 // slot 0 is the natural z, slot 1 sits on top, etc.
@@ -43,19 +75,20 @@ function computeZOffsetSlots(chiplets) {
   const zOffsets = new Array(chiplets.length).fill(0);
   const zGroups = new Map();
   chiplets.forEach((chiplet, idx) => {
-    const key = chiplet.z;
+    const cuboid = getWorldCuboid(chiplet);
+    const key = cuboid[2];
     if (!zGroups.has(key)) zGroups.set(key, []);
-    zGroups.get(key).push({idx, chiplet});
+    zGroups.get(key).push({idx, chiplet, cuboid});
   });
 
   for (const group of zGroups.values()) {
     if (group.length <= 1) continue;
     const slots = [];
-    for (const {idx, chiplet} of group) {
-      const ax1 = chiplet.x;
-      const ay1 = chiplet.y;
-      const ax2 = chiplet.x + chiplet.width;
-      const ay2 = chiplet.y + chiplet.height;
+    for (const {idx, cuboid} of group) {
+      const ax1 = cuboid[0];
+      const ay1 = cuboid[1];
+      const ax2 = cuboid[3];
+      const ay2 = cuboid[4];
       let placed = false;
       for (let s = 0; s < slots.length; s++) {
         const overlaps = slots[s].some(
@@ -172,6 +205,9 @@ export class ThreeDViewerWidget {
 
     this._chipletMeshes =
         []; // tracks chiplet mesh → data for scene rebuild checks
+    this._bumpMeshes = [];
+    this._tsvMeshes = [];
+    this._chipNetMeshes = [];
     this._loading = false;
     this._destroyed = false;
 
@@ -179,6 +215,9 @@ export class ThreeDViewerWidget {
     // onDestroy(). Marked with _shared so _clearScene() does not dispose it
     // when meshes are removed during a rebuild.
     this._edgeMaterial = null;
+    this._bumpMaterial = null;
+    this._tsvMaterial = null;
+    this._chipNetMaterials = new Map();
   }
 
   // ─── Mouse Handlers ────────────────────────────────────────────────
@@ -189,6 +228,7 @@ export class ThreeDViewerWidget {
     canvas.addEventListener('mousedown', (e) => {
       this._mouseDown = true;
       this._mouseButton = e.button;
+      this._dragged = false;
       this._lastMousePos.x = e.clientX;
       this._lastMousePos.y = e.clientY;
       canvas.focus();
@@ -208,6 +248,8 @@ export class ThreeDViewerWidget {
 
       if (dx === 0 && dy === 0)
         return;
+
+      this._dragged = true;
 
       if (this._mouseButton === 0) {
         this._handleRotate(dx, dy);
@@ -272,28 +314,47 @@ export class ThreeDViewerWidget {
     });
 
     canvas.addEventListener('mouseleave', () => { this._hideTooltip(); });
+
+    canvas.addEventListener('click', (e) => {
+      if (!this._dragged) {
+        this._inspectAt(e);
+      }
+    });
   }
 
-  // Options overlay (top-left): toggles like "True Z" that affect how the
-  // scene is rendered.  Mirrors app.useTrueZ so the cookie is the single
-  // source of truth across page reloads.
+  // Options overlay (top-left).  The app owns the values so they survive
+  // widget recreation; cookies keep them across page reloads.
   _createOptionsOverlay() {
     const overlay = document.createElement('div');
     overlay.className = 'three-d-options';
-    const trueZLabel = document.createElement('label');
-    trueZLabel.title = 'Render chiplets at their true Z '
-        + '(disable stacking offset for overlapping chiplets at same Z).';
-    const trueZCb = document.createElement('input');
-    trueZCb.type = 'checkbox';
-    trueZCb.checked = !!this._app.useTrueZ;
-    trueZCb.addEventListener('change', () => {
-      this._app.useTrueZ = trueZCb.checked;
-      setCookie('or_use_true_z', trueZCb.checked ? '1' : '0');
+    const addCheckbox = (label, title, checked, onChange) => {
+      const optionLabel = document.createElement('label');
+      optionLabel.title = title;
+      const checkbox = document.createElement('input');
+      checkbox.type = 'checkbox';
+      checkbox.checked = checked;
+      checkbox.addEventListener('change', () => onChange(checkbox.checked));
+      optionLabel.appendChild(checkbox);
+      optionLabel.appendChild(document.createTextNode(label));
+      overlay.appendChild(optionLabel);
+    };
+    addCheckbox('True Z (no stacking)',
+                'Render chiplets at their true Z (disable stacking offset '
+                    + 'for overlapping chiplets).',
+                !!this._app.useTrueZ,
+                (checked) => {
+      this._app.useTrueZ = checked;
+      setCookie('or_use_true_z', checked ? '1' : '0');
       this.refreshSceneForOptions();
     });
-    trueZLabel.appendChild(trueZCb);
-    trueZLabel.appendChild(document.createTextNode('True Z (no stacking)'));
-    overlay.appendChild(trueZLabel);
+    addCheckbox('Chip Nets',
+                'Show logical package interconnects derived from dbChipNet.',
+                this._app.showChipNets !== false,
+                (checked) => {
+      this._app.showChipNets = checked;
+      setCookie('or_show_chip_nets', checked ? '1' : '0');
+      this.syncVisibility();
+    });
     return overlay;
   }
 
@@ -307,32 +368,140 @@ export class ThreeDViewerWidget {
   }
 
   _updateTooltip(event) {
-    if (!this._chipletMeshes.length) {
-      this._hideTooltip();
-      return;
-    }
-
-    this._setRaycasterFromEvent(event);
-    const meshes = this._chipletMeshes.map((m) => m.mesh);
-    const hits = this._raycaster.intersectObjects(meshes, false);
-    if (hits.length === 0) {
-      this._hideTooltip();
-      return;
-    }
-
-    const hitMesh = hits[0].object;
-    const entry = this._chipletMeshes.find((m) => m.mesh === hitMesh);
+    const entry = this._pickSceneEntry(event);
     if (!entry) {
       this._hideTooltip();
       return;
     }
 
-    this._tooltip.textContent = entry.data.name;
+    if (entry.kind === 'bump') {
+      const net = entry.data.net ? ` · ${entry.data.net}` : '';
+      this._tooltip.textContent = `Bump ${entry.data.name}${net}`;
+    } else if (entry.kind === 'tsv') {
+      this._tooltip.textContent = `TSV ${entry.data.name}`;
+    } else if (entry.kind === 'chip_net') {
+      this._tooltip.textContent = `Chip net ${entry.data.name}`;
+    } else {
+      const type = entry.data.type ? ` [${entry.data.type}]` : '';
+      const orient = entry.data.orient ? ` · ${entry.data.orient}` : '';
+      this._tooltip.textContent = `${entry.data.name}${type}${orient}`;
+    }
     this._tooltip.style.display = 'block';
     // Position relative to canvas container (tooltip is its child).
     const containerRect = this._canvasContainer.getBoundingClientRect();
     this._tooltip.style.left = (event.clientX - containerRect.left + 12) + 'px';
     this._tooltip.style.top = (event.clientY - containerRect.top + 12) + 'px';
+  }
+
+  _pickSceneEntry(event) {
+    const entries = [
+      ...this._chipletMeshes,
+      ...this._bumpMeshes,
+      ...this._tsvMeshes,
+      ...this._chipNetMeshes,
+    ].filter(entry => entry.mesh.visible);
+    if (!entries.length) {
+      return null;
+    }
+
+    this._setRaycasterFromEvent(event);
+    const meshes = entries.map((m) => m.mesh);
+    const hits = this._raycaster.intersectObjects(meshes, false);
+    if (hits.length === 0) {
+      return null;
+    }
+
+    const hitMesh = hits[0].object;
+    const entry = entries.find((m) => m.mesh === hitMesh);
+    return entry || null;
+  }
+
+  _inspectorData(entry) {
+    const property = (name, value) => ({name, value: String(value ?? '')});
+    const cuboid = entry.data.cuboid;
+    const cuboidText = Array.isArray(cuboid) && cuboid.length >= 6
+        ? `[${cuboid[0]}, ${cuboid[1]}, ${cuboid[2]}] → `
+            + `[${cuboid[3]}, ${cuboid[4]}, ${cuboid[5]}] DBU`
+        : '';
+    let type = '3D Object';
+    let name = entry.data.name || '';
+    let bbox = null;
+    let properties = [];
+
+    if (entry.kind === 'bump') {
+      const isPad = entry.data.shape === 'pad';
+      type = isPad ? '3D Pad' : '3D Bump';
+      bbox = entry.data.bbox;
+      properties = [
+        property('Object', isPad ? 'Pad' : 'Bump'),
+        property('Name', name),
+        property('Chiplet', entry.data.chiplet_path),
+        property('Region', entry.data.region),
+        property('Surface', entry.data.world_side),
+        property('Net', entry.data.net || '(unconnected)'),
+        property('BBox', Array.isArray(bbox) ? `[${bbox.join(', ')}] DBU` : ''),
+        property('Z', `${entry.data.z} DBU`),
+      ];
+    } else if (entry.kind === 'tsv') {
+      type = '3D TSV';
+      bbox = Array.isArray(cuboid) ? [cuboid[0], cuboid[1], cuboid[3], cuboid[4]]
+                                   : null;
+      properties = [
+        property('Object', 'TSV'),
+        property('Name', name),
+        property('Chiplet', entry.data.chiplet_path),
+        property('Cuboid', cuboidText),
+      ];
+    } else if (entry.kind === 'chip_net') {
+      type = '3D Chip Net';
+      const terminals = (entry.data.terminals || []).map(
+          terminal => `${terminal.chiplet_path}/${terminal.bump}`).join(', ');
+      properties = [
+        property('Object', 'Package interconnect'),
+        property('Name', name),
+        property('Owner', entry.data.owner_path),
+        property('Terminals', terminals),
+        property('Bond segments', (entry.data.bond_segments || []).length),
+      ];
+      if (entry.data.route) {
+        const route = entry.data.route;
+        properties.push(
+            property('Route', 'ESC detailed polyline'),
+            property('Layer', route.layer || '(unspecified)'),
+            property('Width', route.width == null ? '(unspecified)'
+                                                  : `${route.width} µm`),
+            property('Length', route.length == null ? '(unspecified)'
+                                                    : `${route.length} µm`),
+            property('Route plane', route.plane_path),
+            property('Waypoints', (route.points || []).length));
+      }
+    } else {
+      type = '3D Chiplet';
+      bbox = Array.isArray(cuboid) ? [cuboid[0], cuboid[1], cuboid[3], cuboid[4]]
+                                   : null;
+      properties = [
+        property('Object', 'Chiplet'),
+        property('Name', name),
+        property('Path', entry.data.path),
+        property('Master', entry.data.master),
+        property('Type', entry.data.type),
+        property('Orientation', entry.data.orient),
+        property('Has TSV', entry.data.has_tsv ? 'Yes' : 'No'),
+        property('Cuboid', cuboidText),
+      ];
+    }
+    return {local : true, type, name, bbox, properties};
+  }
+
+  _inspectAt(event) {
+    const entry = this._pickSceneEntry(event);
+    if (!entry || !this._app.updateInspector) {
+      return;
+    }
+    if (this._app.focusComponent) {
+      this._app.focusComponent('Inspector');
+    }
+    this._app.updateInspector(this._inspectorData(entry));
   }
 
   _hideTooltip() {
@@ -466,6 +635,18 @@ export class ThreeDViewerWidget {
       this._edgeMaterial.dispose();
       this._edgeMaterial = null;
     }
+    if (this._bumpMaterial) {
+      this._bumpMaterial.dispose();
+      this._bumpMaterial = null;
+    }
+    if (this._tsvMaterial) {
+      this._tsvMaterial.dispose();
+      this._tsvMaterial = null;
+    }
+    for (const material of this._chipNetMaterials.values()) {
+      material.dispose();
+    }
+    this._chipNetMaterials.clear();
 
     if (this._onMouseMove) {
       window.removeEventListener('mousemove', this._onMouseMove);
@@ -632,11 +813,17 @@ export class ThreeDViewerWidget {
     if (!data || !data.chiplets || data.chiplets.length === 0)
       return;
 
-    const dbu = this._app.getDbuPerMicron();
-    const bounds = this._buildChiplets(data.chiplets, dbu);
+    const dbu = data.dbu_per_micron || this._app.getDbuPerMicron();
+    const drawableChiplets = data.chiplets.filter(
+        chiplet => chiplet.render !== false && chiplet.type !== 'hier');
+    const bounds = this._buildChiplets(drawableChiplets, dbu);
     if (bounds.minX === Infinity)
       return;
 
+    this._buildTsvs(data.tsvs || [], dbu);
+    this._buildBumps(data.bumps || [], dbu);
+    this._buildChipNets(data.chip_nets || [], dbu, bounds);
+    this._applyChipletVisibility();
     this._buildGrid(bounds);
     this._setSceneBoundsAndCenter(bounds);
     this._setInitialCameraState();
@@ -645,6 +832,9 @@ export class ThreeDViewerWidget {
 
   _clearScene() {
     this._chipletMeshes = [];
+    this._bumpMeshes = [];
+    this._tsvMeshes = [];
+    this._chipNetMeshes = [];
     while (this._designGroup.children.length > 0) {
       const child = this._designGroup.children[0];
       this._designGroup.remove(child);
@@ -680,15 +870,20 @@ export class ThreeDViewerWidget {
         : computeZOffsetSlots(chiplets);
 
     chiplets.forEach((chiplet, idx) => {
-      const width = chiplet.width / dbu;
-      const height = chiplet.height / dbu;
-      const depth = (chiplet.thickness / dbu) * kZScale;
+      const cuboid = getWorldCuboid(chiplet);
+      const width = (cuboid[3] - cuboid[0]) / dbu;
+      const height = (cuboid[4] - cuboid[1]) / dbu;
+      const depth = ((cuboid[5] - cuboid[2]) / dbu) * kZScale;
 
-      const colorHex = CHIPLET_PALETTE[idx % CHIPLET_PALETTE.length];
+      const style = CHIP_TYPE_STYLES[chiplet.type] || {
+        color : CHIPLET_PALETTE[idx % CHIPLET_PALETTE.length],
+        opacity : chiplet.has_tsv ? 0.82 : 1.0,
+      };
+      const colorHex = style.color;
       const material = new THREE.MeshPhongMaterial({
         color : colorHex,
-        transparent : false,
-        opacity : 1.0,
+        transparent : style.opacity < 1.0,
+        opacity : style.opacity,
         side : THREE.DoubleSide,
         shininess : 40,
       });
@@ -696,30 +891,336 @@ export class ThreeDViewerWidget {
       const geometry = new THREE.BoxGeometry(width, height, depth);
       const mesh = new THREE.Mesh(geometry, material);
 
-      const cx = (chiplet.x / dbu) + width / 2;
-      const cy = (chiplet.y / dbu) + height / 2;
+      const cx = (cuboid[0] / dbu) + width / 2;
+      const cy = (cuboid[1] / dbu) + height / 2;
       const stackGap = depth * kStackGapFactor;
-      const cz = ((chiplet.z / dbu) * kZScale) + depth / 2 +
+      const cz = ((cuboid[2] / dbu) * kZScale) + depth / 2 +
                  zOffsets[idx] * (depth + stackGap);
 
       mesh.position.set(cx, cy, cz);
       this._designGroup.add(mesh);
-      this._chipletMeshes.push({mesh, data : chiplet, color : colorHex});
-
       const edges = new THREE.EdgesGeometry(geometry);
       const line = new THREE.LineSegments(edges, this._edgeMaterial);
       line.position.set(cx, cy, cz);
       this._designGroup.add(line);
+      this._chipletMeshes.push({
+        mesh,
+        edge : line,
+        data : chiplet,
+        color : colorHex,
+        kind : 'chiplet'
+      });
 
-      bounds.minX = Math.min(bounds.minX, chiplet.x / dbu);
-      bounds.minY = Math.min(bounds.minY, chiplet.y / dbu);
+      bounds.minX = Math.min(bounds.minX, cuboid[0] / dbu);
+      bounds.minY = Math.min(bounds.minY, cuboid[1] / dbu);
       bounds.minZ = Math.min(bounds.minZ, cz - depth / 2);
-      bounds.maxX = Math.max(bounds.maxX, (chiplet.x / dbu) + width);
-      bounds.maxY = Math.max(bounds.maxY, (chiplet.y / dbu) + height);
+      bounds.maxX = Math.max(bounds.maxX, cuboid[3] / dbu);
+      bounds.maxY = Math.max(bounds.maxY, cuboid[4] / dbu);
       bounds.maxZ = Math.max(bounds.maxZ, cz + depth / 2);
     });
 
     return bounds;
+  }
+
+  _buildBumps(bumps, dbu) {
+    if (!this._bumpMaterial) {
+      this._bumpMaterial = new THREE.MeshPhongMaterial({
+        color : BUMP_COLOR,
+        shininess : 90,
+      });
+      this._bumpMaterial._shared = true;
+    }
+
+    for (const bump of bumps) {
+      if (!Array.isArray(bump.bbox) || bump.bbox.length < 4)
+        continue;
+      const width = Math.max((bump.bbox[2] - bump.bbox[0]) / dbu, 1 / dbu);
+      const height = Math.max((bump.bbox[3] - bump.bbox[1]) / dbu, 1 / dbu);
+      const diameter = Math.max(width, height);
+      const isPad = bump.shape === 'pad';
+      const bumpDepth = Math.max(
+          isPad ? diameter * 0.08 : diameter * 0.45, 1 / dbu);
+      const geometry = isPad
+          ? new THREE.BoxGeometry(width, height, bumpDepth)
+          : new THREE.CylinderGeometry(diameter / 2, diameter / 2, bumpDepth,
+                                       16);
+      if (!isPad)
+        geometry.rotateX(Math.PI / 2);
+      const mesh = new THREE.Mesh(geometry, this._bumpMaterial);
+      const cx = (bump.bbox[0] + bump.bbox[2]) / (2 * dbu);
+      const cy = (bump.bbox[1] + bump.bbox[3]) / (2 * dbu);
+      const planeZ = (bump.z / dbu) * kZScale;
+      const stackOffset = this._chipletDisplayZOffset(
+          bump.chiplet_path, dbu);
+      const direction = bump.world_side === 'bottom' ? -1
+          : bump.world_side === 'top' ? 1
+                                      : 0;
+      mesh.position.set(
+          cx, cy, planeZ + stackOffset + direction * bumpDepth / 2);
+      mesh.renderOrder = 30;
+      this._designGroup.add(mesh);
+      this._bumpMeshes.push({mesh, data : bump, kind : 'bump'});
+    }
+  }
+
+  _buildTsvs(tsvs, dbu) {
+    if (!this._tsvMaterial) {
+      this._tsvMaterial = new THREE.MeshPhongMaterial({
+        color : TSV_COLOR,
+        emissive : 0x006064,
+        transparent : true,
+        opacity : 0.9,
+        depthTest : false,
+        depthWrite : false,
+        shininess : 80,
+      });
+      this._tsvMaterial._shared = true;
+    }
+
+    for (const tsv of tsvs) {
+      if (!Array.isArray(tsv.cuboid) || tsv.cuboid.length < 6)
+        continue;
+      const [x1, y1, z1, x2, y2, z2] = tsv.cuboid;
+      const width = Math.max((x2 - x1) / dbu, 1 / dbu);
+      const height = Math.max((y2 - y1) / dbu, 1 / dbu);
+      const depth = Math.max(((z2 - z1) / dbu) * kZScale, 1 / dbu);
+      const radius = Math.max(Math.min(width, height) / 2, 0.5 / dbu);
+      const geometry = new THREE.CylinderGeometry(radius, radius, depth, 16);
+      geometry.rotateX(Math.PI / 2);
+      const mesh = new THREE.Mesh(geometry, this._tsvMaterial);
+      const stackOffset = this._chipletDisplayZOffset(
+          tsv.chiplet_path, dbu);
+      mesh.position.set((x1 + x2) / (2 * dbu),
+                        (y1 + y2) / (2 * dbu),
+                        ((z1 + z2) / (2 * dbu)) * kZScale + stackOffset);
+      mesh.renderOrder = 40;
+      this._designGroup.add(mesh);
+      this._tsvMeshes.push({mesh, data : tsv, kind : 'tsv'});
+    }
+  }
+
+  _chipletDisplayZOffset(path, dbu) {
+    const entry = this._chipletMeshes.find(item => item.data.path === path);
+    if (!entry)
+      return 0;
+    const cuboid = getWorldCuboid(entry.data);
+    const trueCenter = ((cuboid[2] + cuboid[5]) / (2 * dbu)) * kZScale;
+    return entry.mesh.position.z - trueCenter;
+  }
+
+  _chipNetMaterial(name) {
+    let material = this._chipNetMaterials.get(name);
+    if (material) {
+      return material;
+    }
+    let hash = 0;
+    for (const ch of name) {
+      hash = ((hash * 31) + ch.charCodeAt(0)) >>> 0;
+    }
+    const color = CHIP_NET_COLORS[hash % CHIP_NET_COLORS.length];
+    material = new THREE.MeshPhongMaterial({
+      color,
+      emissive : color,
+      emissiveIntensity : 0.3,
+      transparent : true,
+      opacity : 0.92,
+      depthTest : false,
+      depthWrite : false,
+      shininess : 70,
+    });
+    material._shared = true;
+    this._chipNetMaterials.set(name, material);
+    return material;
+  }
+
+  _addChipNetSegment(from, to, radius, material, data, chipletPaths) {
+    const delta = to.clone().sub(from);
+    const length = delta.length();
+    if (length < 1e-6) {
+      return;
+    }
+    const geometry = new THREE.CylinderGeometry(radius, radius, length, 8);
+    const mesh = new THREE.Mesh(geometry, material);
+    mesh.position.copy(from).add(to).multiplyScalar(0.5);
+    mesh.quaternion.setFromUnitVectors(
+        new THREE.Vector3(0, 1, 0), delta.normalize());
+    mesh.renderOrder = 25;
+    this._designGroup.add(mesh);
+    this._chipNetMeshes.push({mesh, data, chipletPaths, kind : 'chip_net'});
+  }
+
+  _buildChipNets(chipNets, dbu, bounds) {
+    const span = Math.max(bounds.maxX - bounds.minX, bounds.maxY - bounds.minY);
+    const radius = Math.max(0.05, span / 500);
+    for (const net of chipNets) {
+      const material = this._chipNetMaterial(net.name || '(unnamed)');
+      const escRoute = net.route;
+      if (escRoute && Array.isArray(escRoute.points)
+          && escRoute.points.length >= 2) {
+        const width = Number(escRoute.width);
+        const routeRadius = Math.max(
+            Number.isFinite(width) && width > 0 ? width / 2 : 0,
+            span / 700);
+        const z = (Number(escRoute.z) / dbu) * kZScale
+            + this._chipletDisplayZOffset(escRoute.plane_path, dbu);
+        const routePoints = [];
+        let previous = null;
+        for (const point of escRoute.points) {
+          if (!Array.isArray(point) || point.length < 2) {
+            previous = null;
+            continue;
+          }
+          const current = new THREE.Vector3(point[0] / dbu, point[1] / dbu, z);
+          routePoints.push(current);
+          if (previous) {
+            this._addChipNetSegment(previous,
+                                     current,
+                                     routeRadius,
+                                     material,
+                                     net,
+                                     [escRoute.plane_path]);
+          }
+          previous = current;
+        }
+
+        if (Array.isArray(net.terminals)
+            && Array.isArray(net.bond_segments)) {
+          for (const segment of net.bond_segments) {
+            const from = net.terminals[segment.from];
+            const to = net.terminals[segment.to];
+            if (!from || !to || !Array.isArray(from.point)
+                || !Array.isArray(to.point) || from.point.length < 3
+                || to.point.length < 3) {
+              continue;
+            }
+            const fromPoint = new THREE.Vector3(
+                from.point[0] / dbu, from.point[1] / dbu,
+                (from.point[2] / dbu) * kZScale
+                    + this._chipletDisplayZOffset(from.chiplet_path, dbu));
+            const toPoint = new THREE.Vector3(
+                to.point[0] / dbu, to.point[1] / dbu,
+                (to.point[2] / dbu) * kZScale
+                    + this._chipletDisplayZOffset(to.chiplet_path, dbu));
+            this._addChipNetSegment(fromPoint, toPoint, radius, material, net,
+                                     [from.chiplet_path, to.chiplet_path]);
+          }
+        }
+
+        // The ESC dbWire is planar.  Complete the physical display by joining
+        // its nearest endpoint to the substrate-top bond bump and by drawing
+        // the through-substrate transition down to the package bump.
+        if (routePoints.length > 0 && Array.isArray(net.terminals)) {
+          const nearestRoutePoint = terminal => routePoints.reduce(
+              (nearest, point) => {
+                const nearestDistance = (nearest.x - terminal.point[0] / dbu) ** 2
+                    + (nearest.y - terminal.point[1] / dbu) ** 2;
+                const pointDistance = (point.x - terminal.point[0] / dbu) ** 2
+                    + (point.y - terminal.point[1] / dbu) ** 2;
+                return pointDistance < nearestDistance ? point : nearest;
+              });
+          for (const terminal of net.terminals) {
+            if (!Array.isArray(terminal.point) || terminal.point.length < 3
+                || terminal.chip_type !== 'substrate') {
+              continue;
+            }
+            const routePoint = nearestRoutePoint(terminal);
+            const terminalZ = (terminal.point[2] / dbu) * kZScale
+                + this._chipletDisplayZOffset(terminal.chiplet_path, dbu);
+            const terminalPoint = new THREE.Vector3(
+                terminal.point[0] / dbu, terminal.point[1] / dbu, terminalZ);
+            if (terminal.side === 'front') {
+              const planePoint = new THREE.Vector3(
+                  terminalPoint.x, terminalPoint.y, routePoint.z);
+              this._addChipNetSegment(planePoint, routePoint, routeRadius,
+                                       material, net,
+                                       [escRoute.plane_path,
+                                        terminal.chiplet_path]);
+            } else if (terminal.side === 'back') {
+              this._addChipNetSegment(routePoint, terminalPoint, routeRadius,
+                                       material, net,
+                                       [escRoute.plane_path,
+                                        terminal.chiplet_path]);
+            }
+          }
+        }
+        continue;
+      }
+
+      if (!Array.isArray(net.terminals) || !Array.isArray(net.segments)) {
+        continue;
+      }
+      for (const segment of net.segments) {
+        const from = net.terminals[segment.from];
+        const to = net.terminals[segment.to];
+        if (!from || !to || !Array.isArray(from.point) || !Array.isArray(to.point)
+            || from.point.length < 3 || to.point.length < 3) {
+          continue;
+        }
+        const fromOffset = this._chipletDisplayZOffset(from.chiplet_path, dbu);
+        const toOffset = this._chipletDisplayZOffset(to.chiplet_path, dbu);
+        const fromPoint = new THREE.Vector3(from.point[0] / dbu,
+                                            from.point[1] / dbu,
+                                            (from.point[2] / dbu) * kZScale
+                                                + fromOffset);
+        const toPoint = new THREE.Vector3(to.point[0] / dbu,
+                                          to.point[1] / dbu,
+                                          (to.point[2] / dbu) * kZScale
+                                              + toOffset);
+        // dbChipNet records endpoints, not detailed RDL tracks.  Use a
+        // Manhattan dogleg at the lower endpoint plane to make that logical
+        // package connection legible while preserving each physical endpoint.
+        const routeZ = Math.min(fromPoint.z, toPoint.z);
+        const viaFrom = new THREE.Vector3(fromPoint.x, fromPoint.y, routeZ);
+        const corner = new THREE.Vector3(toPoint.x, fromPoint.y, routeZ);
+        const viaTo = new THREE.Vector3(toPoint.x, toPoint.y, routeZ);
+        const chipletPaths = [from.chiplet_path, to.chiplet_path];
+        this._addChipNetSegment(fromPoint, viaFrom, radius, material, net,
+                                 chipletPaths);
+        this._addChipNetSegment(viaFrom, corner, radius, material, net,
+                                 chipletPaths);
+        this._addChipNetSegment(corner, viaTo, radius, material, net,
+                                 chipletPaths);
+        this._addChipNetSegment(viaTo, toPoint, radius, material, net,
+                                 chipletPaths);
+      }
+    }
+  }
+
+  _isChipletVisible(path) {
+    const visible = this._app.visibleChiplets;
+    return !(visible instanceof Set) || visible.has(path);
+  }
+
+  _applyChipletVisibility() {
+    for (const entry of this._chipletMeshes) {
+      const visible = this._isChipletVisible(entry.data.path);
+      entry.mesh.visible = visible;
+      if (entry.edge) {
+        entry.edge.visible = visible;
+      }
+    }
+    for (const entry of this._bumpMeshes) {
+      entry.mesh.visible = this._isChipletVisible(entry.data.chiplet_path);
+    }
+    for (const entry of this._tsvMeshes) {
+      entry.mesh.visible = this._isChipletVisible(entry.data.chiplet_path);
+    }
+    for (const entry of this._chipNetMeshes) {
+      entry.mesh.visible = this._app.showChipNets !== false
+          && entry.chipletPaths.every(
+          path => this._isChipletVisible(path));
+    }
+  }
+
+  // Keep the 3D scene in lockstep with the Chiplets visibility tree.  Meshes
+  // remain allocated so toggles are immediate and do not require another
+  // get_3d_data round trip or reset the user's camera.
+  syncVisibility() {
+    if (this._destroyed)
+      return;
+    this._applyChipletVisibility();
+    this._hideTooltip();
+    this.render();
   }
 
   _buildGrid(bounds) {
@@ -755,11 +1256,11 @@ export class ThreeDViewerWidget {
   // that highlights land on the rendered chiplet, not its nominal z.
   _stackOffsetForPoint(z, cx, cy, dbu) {
     for (const {mesh, data: chiplet} of this._chipletMeshes) {
-      if (z !== chiplet.z) continue;
-      if (cx < chiplet.x || cx > chiplet.x + chiplet.width) continue;
-      if (cy < chiplet.y || cy > chiplet.y + chiplet.height) continue;
-      const chipDepth = (chiplet.thickness / dbu) * kZScale;
-      const originalCZ = ((chiplet.z / dbu) * kZScale) + chipDepth / 2;
+      const cuboid = getWorldCuboid(chiplet);
+      if (z < cuboid[2] || z > cuboid[5]) continue;
+      if (cx < cuboid[0] || cx > cuboid[3]) continue;
+      if (cy < cuboid[1] || cy > cuboid[4]) continue;
+      const originalCZ = ((cuboid[2] + cuboid[5]) / (2 * dbu)) * kZScale;
       return mesh.position.z - originalCZ;
     }
     return 0;

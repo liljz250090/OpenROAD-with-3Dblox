@@ -343,6 +343,121 @@ geometric pick.
 
 ---
 
+## 3D chiplet scene
+
+### `get_3d_data`
+
+Return the complete `dbChipInst` hierarchy as world-space 3D geometry. No
+request fields are required beyond the envelope.
+
+Every `cuboid` uses DBU coordinates in the order
+`[xMin, yMin, zMin, xMax, yMax, zMax]`. Parent transforms are accumulated by
+the server, including R90/R270, MX/MY and MZ, so clients must not transform the
+cuboids again. Pure `HIER` nodes remain in `chiplets` to preserve the tree but
+have `render: false`.
+
+**Response (JSON):**
+
+```json
+{
+  "dbu_per_micron": 1000,
+  "chiplets": [{
+    "path": "top.package.compute_0",
+    "parent": "top.package",
+    "name": "compute_0",
+    "master": "compute_die",
+    "type": "die",
+    "depth": 2,
+    "cuboid": [1000, 2000, 300, 5000, 6000, 500],
+    "orient": "MZ_R90",
+    "mirror_z": true,
+    "has_tsv": true,
+    "render": true
+  }],
+  "bumps": [{
+    "path": "top.package.compute_0/front/bump_0",
+    "chiplet_path": "top.package.compute_0",
+    "name": "bump_0",
+    "region": "front",
+    "side": "front",
+    "world_side": "bottom",
+    "shape": "bump",
+    "bbox": [1200, 2200, 1250, 2250],
+    "z": 300,
+    "net": "die_to_die_0"
+  }],
+  "tsvs": [{
+    "path": "top.package.compute_0/tsv/bump_0",
+    "chiplet_path": "top.package.compute_0",
+    "name": "bump_0",
+    "cuboid": [1200, 2200, 300, 1250, 2250, 500]
+  }],
+  "chip_nets": [{
+    "name": "die_to_die_0",
+    "owner_path": "top.package",
+    "terminals": [{
+      "chiplet_path": "top.package.compute_0",
+      "bump": "bump_0",
+      "chip_type": "die",
+      "side": "back",
+      "point": [1200, 2200, 300]
+    }, {
+      "chiplet_path": "top.package.rdl_0",
+      "bump": "rdl_bump_0",
+      "chip_type": "substrate",
+      "side": "front",
+      "point": [1200, 2200, 280]
+    }],
+    "segments": [{"from": 0, "to": 1}],
+    "bond_segments": [{"from": 0, "to": 1}],
+    "route": {
+      "id": "esc:die_to_die_0",
+      "net": "die_to_die_0",
+      "plane_path": "top.package.substrate_0",
+      "layer": "RDL1",
+      "width": 13.0,
+      "length": 2314.28,
+      "z": 280,
+      "points": [[1200, 2200], [1800, 2200], [2200, 2600]]
+    }
+  }],
+  "chip_nets_truncated": false
+}
+```
+
+`type` is one of `die`, `ip`, `substrate`, `rdl`, or `hier`. `side` is the
+region's master-chip side; `world_side` is `top`, `bottom`, or `internal` after
+all MZ transforms and is suitable for positioning bump geometry. `shape` is
+`bump` for a protruding bump and `pad` for a planar substrate bond/RDL pad.
+
+OpenDB currently records TSV presence as a chip-level flag rather than
+individual TSV objects. For a chip with `has_tsv: true`, the server derives the
+`tsvs` columns from its physical bump XY sites and spans each column across the
+transformed chip cuboid. No TSV is invented when the chip has no bump sites.
+
+`chip_nets` comes from `dbChipNet`. Each terminal identifies its bump's
+`chip_type` and master-chip `side`, as well as its fully transformed world-space
+endpoint. `bond_segments` is emitted for XY-aligned die `back` and
+substrate/RDL `front` terminals; it represents the vertical bond interface.
+Because OpenDB `dbChipNet` does not contain detailed router paths, the client
+otherwise renders each endpoint pair as a Manhattan package-interconnect
+overlay. `chip_nets_truncated` is true when the 50,000-segment safety limit is
+reached.
+
+When the loaded database has `esc_route.<NET>` properties, the matching
+`chip_nets` entry carries a detailed `route` object instead of being rendered
+as an endpoint-only dogleg. The client keeps `bond_segments` visible alongside
+that route and joins the RDL route to substrate front/back terminals, showing
+the through-substrate transition to a bottom package bump. `points` and `z`
+are DBU values; `width` and `length` are microns. `plane_path` identifies the
+substrate/RDL chiplet whose top surface hosts the single-layer ESC path. For
+older collateral without a `dbChipNet`, the server emits an ESC-backed
+`chip_nets` entry with empty terminals so the detailed route remains visible
+under the same `Chip Nets` display control.
+
+
+---
+
 ## Tcl
 
 ### `tcl_eval`
