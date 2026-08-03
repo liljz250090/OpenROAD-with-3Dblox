@@ -64,7 +64,7 @@ Input (3DBlox)                    Algorithm                   Output (OpenDB)
 ─────────────────                 ─────────                   ────────────────
 top.3dbx ─┐
 die.3dbv ─┤─ read_3dbx ─→ dbChipBump::getNet() ─→ Escaper ─→ top dbChip route properties
-sub.3dbv ─┤  top.v ─→ dbChipNet (die / bond-pad / RDL-pad / package) │ dbStringProperty (route polylines)
+sub.3dbv ─┤  top.v ─→ dbChipNet (die / bond-bump / RDL-pad / package)│ dbStringProperty (route polylines)
            └────────── dbInst::getLocation() ───────────┘       dbDoubleProperty (lengths)
 ```
 
@@ -73,7 +73,7 @@ sub.3dbv ─┤  top.v ─→ dbChipNet (die / bond-pad / RDL-pad / package) │
 Each routed net is written to OpenDB as:
 
 - **`dbChipNet`** at the package level, created from `top.v`; each test net
-  contains the die bottom bump, aligned substrate-top bond pad, top-RDL
+  contains the die bottom bump, aligned substrate-top bond bump, top-RDL
   landing pad, and substrate-bottom package bump
 - **`dbStringProperty`** `esc_route.<NET>` — serialised route polyline
 - **`dbDoubleProperty`** `esc_route_length.<NET>` — wire length
@@ -100,9 +100,9 @@ plane. All properties are preserved by `write_db`.
 src/esc/test/case0/
 ├── top.3dbx          # 3DBlox assembly (EscapeRouting, 2 chiplets)
 ├── die.3dbv          # DieChiplet (5 bumps, BACK side, 680×680 µm)
-├── substrate.3dbv    # SubChiplet (top bond/RDL pads + bottom bumps, 4000×3000 µm)
+├── substrate.3dbv    # SubChiplet (top bond bumps/RDL pads + bottom bumps, 4000×3000 µm)
 ├── die_bumps.bmap    # Die bump map
-├── top_bond_bumps.bmap # Substrate-top bond pads aligned to die bumps
+├── top_bond_bumps.bmap # Substrate-top bond bumps aligned to die bumps
 ├── top_rdl_pads.bmap # Substrate-top RDL landing pads (ESC targets)
 ├── substrate_bumps.bmap
 ├── top.v             # Package-level NET_* dbChipNet connectivity
@@ -125,23 +125,25 @@ Total wirelength: 9891.83 µm
 
 The substrate is centred below the die: it occupies `x=-1660..2340 µm`,
 `y=-1160..1840 µm`, and `z=0..90 µm`, while the die footprint is
-`x=0..680 µm`, `y=0..680 µm`, and `z=110..200 µm`. The assembly has a valid
+`x=0..680 µm`, `y=0..680 µm`, and `z=116..206 µm`. The assembly has a valid
 `dbChipConn` named `die_to_substrate` between the die's `BACK` bond region and
-the substrate's `FRONT` bond region. Its 20-µm thickness matches the physical
+the substrate's `FRONT` bond region. Its 26-µm thickness matches the physical
 gap. A second virtual `dbChipConn`, `substrate_to_package`, anchors the
 substrate's bottom RDL face to the package/PCB; this supplies OpenDB's ground
 group and prevents floating-chip warnings. The die's `BACK` bumps are at
-`z=110 µm`; the substrate's `BACK` RDL/package bumps are at `z=0 µm`. Package
+`z=116 µm`; the substrate's `BACK` RDL/package bumps are at `z=0 µm`. Package
 bumps use substrate-local coordinates and populate all four substrate perimeter
-edges. The top bond and RDL landing sites are planar pads in the web viewer;
-they use the 3DBlox bump endpoint representation solely to participate in a
-`dbChipNet`. ESC routes only on the substrate's top RDL, toward the east-side
-top-RDL landing pads, which matches its current single-direction model.
+edges. The top bond sites are physical bumps: each directly contacts the
+matching die-bottom bump, with no chip-net line between them in the web viewer.
+The RDL landing sites remain planar pads. Both use the 3DBlox bump endpoint
+representation to participate in a `dbChipNet`. ESC routes only on the
+substrate's top RDL, toward the east-side top-RDL landing pads, which matches
+its current single-direction model.
 
 For every `NET_*`, `top.v` creates one `dbChipNet` with four physical
-terminals: the die's bottom bump, the XY-aligned substrate-top bond pad, a
+terminals: the die's bottom bump, the XY-aligned substrate-top bond bump, a
 top-RDL landing pad, and the substrate-bottom package bump. ESC writes only
-the top-RDL route from the bond pad to the RDL landing pad. The landing pad and
+the top-RDL route from the bond bump to the RDL landing pad. The landing pad and
 bottom package bump share XY, so the web 3D viewer renders their direct
 through-substrate connection without creating a second horizontal RDL layer.
 

@@ -6,6 +6,7 @@
 #include <algorithm>
 #include <any>
 #include <array>
+#include <cctype>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
@@ -1718,6 +1719,13 @@ WebSocketResponse SelectHandler::handleGet3DData(const WebSocketRequest& req)
       }
       return "unknown";
     };
+    auto lowerCase = [](std::string text) {
+      std::transform(
+          text.begin(), text.end(), text.begin(), [](unsigned char ch) {
+            return std::tolower(ch);
+          });
+      return text;
+    };
 
     boost::json::object root;
     const int64_t dbu_per_micron = gen_->getDb()->getDbuPerMicron();
@@ -1869,9 +1877,18 @@ WebSocketResponse SelectHandler::handleGet3DData(const WebSocketRequest& req)
       std::string bump_name;
       std::string chip_type;
       std::string side;
+      std::string region_name;
       int x = 0;
       int y = 0;
       int z = 0;
+      int x_min = 0;
+      int y_min = 0;
+      int x_max = 0;
+      int y_max = 0;
+      int chip_z_min = 0;
+      int chip_z_max = 0;
+      bool tsv_endpoint = false;
+      bool direct_bond_endpoint = false;
     };
     auto endpoint_for = [&](const ChipletNode& owner,
                             odb::dbChipBumpInst* bump_inst,
@@ -1908,15 +1925,25 @@ WebSocketResponse SelectHandler::handleGet3DData(const WebSocketRequest& req)
       endpoint.bump_name = bump_db_inst->getName();
       endpoint.chip_type = chipTypeName(endpoint_node.chip->getChipType());
       endpoint.side = regionSideName(region_inst->getChipRegion()->getSide());
+      endpoint.region_name = region_inst->getChipRegion()->getName();
       endpoint.x = bbox.xCenter();
       endpoint.y = bbox.yCenter();
       endpoint.z = region.zCenter();
+      endpoint.x_min = bbox.xMin();
+      endpoint.y_min = bbox.yMin();
+      endpoint.x_max = bbox.xMax();
+      endpoint.y_max = bbox.yMax();
+      odb::Cuboid chip_cuboid = endpoint_node.chip->getCuboid();
+      endpoint_node.world_xfm.apply(chip_cuboid);
+      endpoint.chip_z_min = chip_cuboid.zMin();
+      endpoint.chip_z_max = chip_cuboid.zMax();
       return true;
     };
     // dbChipNet is the package-level electrical view: each entry names the
     // physical bump occurrences participating in one cross-chiplet net.  It
     // has no detailed router segments, so emit endpoint pairs for the client
     // to render as an explicit logical interconnect overlay.
+    std::set<std::string> emitted_logical_tsvs;
     for (const ChipletNode& owner : chiplet_nodes) {
       if (owner.chip == nullptr
           || owner.chip->getChipType() != odb::dbChip::ChipType::HIER) {
@@ -1936,6 +1963,91 @@ WebSocketResponse SelectHandler::handleGet3DData(const WebSocketRequest& req)
         if (endpoints.size() < 2) {
           continue;
         }
+
+        // ESC uses one top-RDL plane.  A top RDL landing pad and an aligned
+        // bottom package bump on the same substrate form a through-substrate
+        // connection, so model it as a logical TSV.  OpenDB has no per-TSV
+        // package object (and common test technologies provide no TSV via),
+        // but these endpoint bboxes and the substrate body give it exact
+        // physical geometry for the 3D viewer.
+        for (const ChipNetEndpoint& top_endpoint : endpoints) {
+          const std::string top_region = lowerCase(top_endpoint.region_name);
+          const bool is_top_rdl_pad
+              = (top_endpoint.chip_type == "substrate"
+                 || top_endpoint.chip_type == "rdl")
+                && top_endpoint.side == "front"
+                && top_region.find("rdl") != std::string::npos
+                && top_region.find("pad") != std::string::npos;
+          if (!is_top_rdl_pad) {
+            continue;
+          }
+          for (ChipNetEndpoint& bottom_endpoint : endpoints) {
+            const bool is_aligned_bottom_bump
+                = (bottom_endpoint.chip_type == "substrate"
+                   || bottom_endpoint.chip_type == "rdl")
+                  && bottom_endpoint.side == "back"
+                  && bottom_endpoint.chiplet_path == top_endpoint.chiplet_path
+                  && bottom_endpoint.x == top_endpoint.x
+                  && bottom_endpoint.y == top_endpoint.y;
+            if (!is_aligned_bottom_bump) {
+              continue;
+            }
+            bottom_endpoint.tsv_endpoint = true;
+            const std::string key = top_endpoint.chiplet_path + "\n"
+                                    + chip_net->getName() + "\n"
+                                    + std::to_string(top_endpoint.x) + "\n"
+                                    + std::to_string(top_endpoint.y);
+            if (emitted_logical_tsvs.insert(key).second) {
+              boost::json::object tsv_obj;
+              tsv_obj["path"]
+                  = top_endpoint.chiplet_path + "/tsv/" + chip_net->getName();
+              tsv_obj["chiplet_path"] = top_endpoint.chiplet_path;
+              tsv_obj["name"] = "TSV_" + std::string(chip_net->getName());
+              tsv_obj["net"] = chip_net->getName();
+              tsv_obj["cuboid"]
+                  = cuboidArray(odb::Cuboid(top_endpoint.x_min,
+                                            top_endpoint.y_min,
+                                            top_endpoint.chip_z_min,
+                                            top_endpoint.x_max,
+                                            top_endpoint.y_max,
+                                            top_endpoint.chip_z_max));
+              tsvs.emplace_back(std::move(tsv_obj));
+            }
+            break;
+          }
+        }
+
+        // A chip net can explicitly contain a die bottom bump and its
+        // substrate top counterpart. A planar pad needs a displayed bond
+        // segment; two physical bumps meet directly and need no extra line.
+        boost::json::array bond_segments;
+        for (size_t die_index = 0; die_index < endpoints.size(); ++die_index) {
+          ChipNetEndpoint& die_endpoint = endpoints[die_index];
+          if (die_endpoint.chip_type != "die" || die_endpoint.side != "back") {
+            continue;
+          }
+          for (size_t substrate_index = 0; substrate_index < endpoints.size();
+               ++substrate_index) {
+            ChipNetEndpoint& substrate_endpoint = endpoints[substrate_index];
+            if ((substrate_endpoint.chip_type != "substrate"
+                 && substrate_endpoint.chip_type != "rdl")
+                || substrate_endpoint.side != "front"
+                || substrate_endpoint.x != die_endpoint.x
+                || substrate_endpoint.y != die_endpoint.y) {
+              continue;
+            }
+            if (lowerCase(substrate_endpoint.region_name).find("pad")
+                != std::string::npos) {
+              bond_segments.emplace_back(boost::json::object{
+                  {"from", static_cast<int64_t>(die_index)},
+                  {"to", static_cast<int64_t>(substrate_index)}});
+            } else {
+              die_endpoint.direct_bond_endpoint = true;
+              substrate_endpoint.direct_bond_endpoint = true;
+            }
+            break;
+          }
+        }
         boost::json::object net_obj;
         net_obj["name"] = chip_net->getName();
         net_obj["owner_path"] = owner.path;
@@ -1946,37 +2058,11 @@ WebSocketResponse SelectHandler::handleGet3DData(const WebSocketRequest& req)
               {"bump", endpoint.bump_name},
               {"chip_type", endpoint.chip_type},
               {"side", endpoint.side},
+              {"region", endpoint.region_name},
+              {"tsv", endpoint.tsv_endpoint},
+              {"bonded", endpoint.direct_bond_endpoint},
               {"point",
                boost::json::array{endpoint.x, endpoint.y, endpoint.z}}});
-        }
-
-        // A chip net can explicitly contain a die bottom bump and its
-        // substrate top bond-bump counterpart.  These two pins are vertically
-        // aligned across a dbChipConn bond interface.  Export those segments
-        // separately so a detailed ESC route does not hide the physical
-        // die-to-substrate bond in the 3D view.
-        boost::json::array bond_segments;
-        for (size_t die_index = 0; die_index < endpoints.size(); ++die_index) {
-          const ChipNetEndpoint& die_endpoint = endpoints[die_index];
-          if (die_endpoint.chip_type != "die" || die_endpoint.side != "back") {
-            continue;
-          }
-          for (size_t substrate_index = 0; substrate_index < endpoints.size();
-               ++substrate_index) {
-            const ChipNetEndpoint& substrate_endpoint
-                = endpoints[substrate_index];
-            if ((substrate_endpoint.chip_type != "substrate"
-                 && substrate_endpoint.chip_type != "rdl")
-                || substrate_endpoint.side != "front"
-                || substrate_endpoint.x != die_endpoint.x
-                || substrate_endpoint.y != die_endpoint.y) {
-              continue;
-            }
-            bond_segments.emplace_back(boost::json::object{
-                {"from", static_cast<int64_t>(die_index)},
-                {"to", static_cast<int64_t>(substrate_index)}});
-            break;
-          }
         }
         boost::json::array segments;
         for (size_t i = 1; i < endpoints.size(); ++i) {

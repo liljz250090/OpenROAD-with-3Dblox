@@ -450,6 +450,7 @@ export class ThreeDViewerWidget {
         property('Object', 'TSV'),
         property('Name', name),
         property('Chiplet', entry.data.chiplet_path),
+        property('Net', entry.data.net || '(unconnected)'),
         property('Cuboid', cuboidText),
       ];
     } else if (entry.kind === 'chip_net') {
@@ -938,8 +939,12 @@ export class ThreeDViewerWidget {
       const height = Math.max((bump.bbox[3] - bump.bbox[1]) / dbu, 1 / dbu);
       const diameter = Math.max(width, height);
       const isPad = bump.shape === 'pad';
-      const bumpDepth = Math.max(
+      // Chip bodies and TSVs use kZScale to make package depth legible. Apply
+      // the same scale to bump protrusion, otherwise two physical bumps that
+      // meet across a dbChipConn gap appear to float apart in the 3D view.
+      const physicalBumpDepth = Math.max(
           isPad ? diameter * 0.08 : diameter * 0.45, 1 / dbu);
+      const bumpDepth = physicalBumpDepth * kZScale;
       const geometry = isPad
           ? new THREE.BoxGeometry(width, height, bumpDepth)
           : new THREE.CylinderGeometry(diameter / 2, diameter / 2, bumpDepth,
@@ -1107,8 +1112,9 @@ export class ThreeDViewerWidget {
         }
 
         // The ESC dbWire is planar.  Complete the physical display by joining
-        // its nearest endpoint to the substrate-top bond bump and by drawing
-        // the through-substrate transition down to the package bump.
+        // its nearest endpoint to the substrate-top bond bump.  An aligned
+        // top-RDL pad and package bump are emitted separately as a TSV, not
+        // as a generic chip-net vertical segment.
         if (routePoints.length > 0 && Array.isArray(net.terminals)) {
           const nearestRoutePoint = terminal => routePoints.reduce(
               (nearest, point) => {
@@ -1135,7 +1141,7 @@ export class ThreeDViewerWidget {
                                        material, net,
                                        [escRoute.plane_path,
                                         terminal.chiplet_path]);
-            } else if (terminal.side === 'back') {
+            } else if (terminal.side === 'back' && !terminal.tsv) {
               this._addChipNetSegment(routePoint, terminalPoint, routeRadius,
                                        material, net,
                                        [escRoute.plane_path,
@@ -1153,7 +1159,8 @@ export class ThreeDViewerWidget {
         const from = net.terminals[segment.from];
         const to = net.terminals[segment.to];
         if (!from || !to || !Array.isArray(from.point) || !Array.isArray(to.point)
-            || from.point.length < 3 || to.point.length < 3) {
+            || from.point.length < 3 || to.point.length < 3 || from.tsv
+            || to.tsv || (from.bonded && to.bonded)) {
           continue;
         }
         const fromOffset = this._chipletDisplayZOffset(from.chiplet_path, dbu);

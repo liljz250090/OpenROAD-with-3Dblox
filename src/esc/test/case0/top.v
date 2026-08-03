@@ -1,5 +1,5 @@
 // Package-level connectivity. Each NET_* owns a die micro-bump, an aligned
-// substrate-top bond pad, a top-RDL landing pad, and a bottom package bump.
+// substrate-top bond bump, a top-RDL landing pad, and a bottom package bump.
 module DieChiplet (
     input port_NET_A,
     input port_NET_B,

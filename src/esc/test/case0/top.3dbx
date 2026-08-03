@@ -24,7 +24,9 @@ ChipletInst:
 Stack:
   die_inst:
     loc: [0.0, 0.0]
-    z: 110.0
+    # The 26 µm bond gap equals the two 13 µm demo bump heights, so the
+    # die-bottom and substrate-top bump bodies meet directly.
+    z: 116.0
     orient: R0
   substrate_inst:
     loc: [-1660.0, -1160.0]
@@ -34,8 +36,8 @@ Stack:
 Connection:
   die_to_substrate:
     top: die_inst.regions.bond_region
-    bot: substrate_inst.regions.top_bond_pad_region
-    thickness: 20.0
+    bot: substrate_inst.regions.top_bond_bump_region
+    thickness: 26.0
   substrate_to_package:
     # The substrate's bottom RDL face is the package/PCB interface.
     top: substrate_inst.regions.rdl_bump_region

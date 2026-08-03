@@ -2090,13 +2090,13 @@ TEST_F(ThreeDSceneHandlerTest, PackageInterconnectsSerializeChipNet)
             (std::set<std::string>{"top.group_i.die_i", "top.peer_i"}));
 }
 
-TEST_F(ThreeDSceneHandlerTest, AlignedBondBumpsSerializeBondSegment)
+TEST_F(ThreeDSceneHandlerTest, AlignedBondBumpsAreDirectConnections)
 {
   odb::dbMaster* bump_master
       = die_->getBlock()->findInst("bump_0")->getMaster();
 
-  // Create a die bottom bump and two substrate bumps: a top-side bond bump
-  // aligned with the die, plus a bottom-side package bump for the same net.
+  // Create a die bottom bump and three substrate terminals: an aligned
+  // top-side bond bump, a top-RDL pad, and its aligned package bump.
   odb::dbChipRegion* die_bottom = odb::dbChipRegion::create(
       die_, "bond_bottom", odb::dbChipRegion::Side::BACK, nullptr);
   die_bottom->setBox(odb::Rect(0, 0, 100, 200));
@@ -2109,16 +2109,24 @@ TEST_F(ThreeDSceneHandlerTest, AlignedBondBumpsSerializeBondSegment)
   odb::dbBlock* substrate_block
       = odb::dbBlock::create(substrate_, "substrate_bond_block");
   odb::dbChipRegion* substrate_top = odb::dbChipRegion::create(
-      substrate_, "bond_pad", odb::dbChipRegion::Side::FRONT, nullptr);
+      substrate_, "bond_bump", odb::dbChipRegion::Side::FRONT, nullptr);
   substrate_top->setBox(odb::Rect(0, 0, 1000, 800));
   odb::dbChipRegion* substrate_bottom = odb::dbChipRegion::create(
       substrate_, "package_bottom", odb::dbChipRegion::Side::BACK, nullptr);
   substrate_bottom->setBox(odb::Rect(0, 0, 1000, 800));
+  odb::dbChipRegion* substrate_rdl = odb::dbChipRegion::create(
+      substrate_, "top_rdl_pad", odb::dbChipRegion::Side::FRONT, nullptr);
+  substrate_rdl->setBox(odb::Rect(0, 0, 1000, 800));
   odb::dbInst* top_bump_inst
       = odb::dbInst::create(substrate_block, bump_master, "bond_substrate");
   top_bump_inst->setOrigin(20, 40);
   top_bump_inst->setPlacementStatus(odb::dbPlacementStatus::PLACED);
   odb::dbChipBump::create(substrate_top, top_bump_inst);
+  odb::dbInst* rdl_pad_inst
+      = odb::dbInst::create(substrate_block, bump_master, "rdl_pad");
+  rdl_pad_inst->setOrigin(600, 40);
+  rdl_pad_inst->setPlacementStatus(odb::dbPlacementStatus::PLACED);
+  odb::dbChipBump::create(substrate_rdl, rdl_pad_inst);
   odb::dbInst* package_bump_inst
       = odb::dbInst::create(substrate_block, bump_master, "package_substrate");
   package_bump_inst->setOrigin(600, 40);
@@ -2135,7 +2143,11 @@ TEST_F(ThreeDSceneHandlerTest, AlignedBondBumpsSerializeBondSegment)
   package_net->addBumpInst(
       *die_inst->findChipRegionInst("bond_bottom")->getChipBumpInsts().begin(),
       {die_inst});
-  package_net->addBumpInst(*substrate_inst->findChipRegionInst("bond_pad")
+  package_net->addBumpInst(*substrate_inst->findChipRegionInst("bond_bump")
+                                ->getChipBumpInsts()
+                                .begin(),
+                           {substrate_inst});
+  package_net->addBumpInst(*substrate_inst->findChipRegionInst("top_rdl_pad")
                                 ->getChipBumpInsts()
                                 .begin(),
                            {substrate_inst});
@@ -2148,13 +2160,31 @@ TEST_F(ThreeDSceneHandlerTest, AlignedBondBumpsSerializeBondSegment)
   const boost::json::object* serialized_net
       = findByString(scene.at("chip_nets").as_array(), "name", "bond_net");
   ASSERT_NE(serialized_net, nullptr);
-  ASSERT_TRUE(serialized_net->contains("bond_segments"));
-  EXPECT_EQ(serialized_net->at("terminals").as_array().size(), 3u);
-  EXPECT_EQ(serialized_net->at("bond_segments").as_array().size(), 1u);
+  EXPECT_FALSE(serialized_net->contains("bond_segments"));
+  EXPECT_EQ(serialized_net->at("terminals").as_array().size(), 4u);
+  const boost::json::array& terminals
+      = serialized_net->at("terminals").as_array();
+  ASSERT_EQ(terminals.size(), 4u);
+  EXPECT_TRUE(terminals[0].as_object().at("bonded").as_bool());
+  EXPECT_TRUE(terminals[1].as_object().at("bonded").as_bool());
+  EXPECT_TRUE(terminals[3].as_object().at("tsv").as_bool());
   const boost::json::object* pad
-      = findByString(scene.at("bumps").as_array(), "region", "bond_pad");
+      = findByString(scene.at("bumps").as_array(), "region", "bond_bump");
   ASSERT_NE(pad, nullptr);
-  EXPECT_EQ(std::string(pad->at("shape").as_string()), "pad");
+  EXPECT_EQ(std::string(pad->at("shape").as_string()), "bump");
+  const boost::json::object* tsv
+      = findByString(scene.at("tsvs").as_array(), "net", "bond_net");
+  ASSERT_NE(tsv, nullptr);
+  odb::Rect expected_tsv_xy = rdl_pad_inst->getBBox()->getBox();
+  substrate_inst->getTransform().apply(expected_tsv_xy);
+  const odb::Cuboid substrate_cuboid = substrate_inst->getCuboid();
+  expectCuboid(tsv->at("cuboid").as_array(),
+               odb::Cuboid(expected_tsv_xy.xMin(),
+                           expected_tsv_xy.yMin(),
+                           substrate_cuboid.zMin(),
+                           expected_tsv_xy.xMax(),
+                           expected_tsv_xy.yMax(),
+                           substrate_cuboid.zMax()));
 }
 
 TEST_F(ThreeDSceneHandlerTest, EscRoutesSerializeDetailedPackagePolylines)

@@ -12,7 +12,7 @@ ChipletDef:
     design_area: [4000.0, 3000.0]
     thickness: 90.0
     regions:
-      top_bond_pad_region:
+      top_bond_bump_region:
         side: front
         bmap: top_bond_bumps.bmap
         coords:

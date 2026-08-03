@@ -1,7 +1,7 @@
-# Substrate top-side bond pads. Each site is directly below the matching
-# die-side micro-bump; coordinates are local to SubChiplet.  The 3DBlox bump
-# representation supplies dbChipNet endpoints; the web view renders this
-# region as a planar pad rather than as a protruding bump.
+# Substrate top-side bond bumps. Each site is directly below the matching
+# die-side micro-bump; coordinates are local to SubChiplet. The pair directly
+# meets across the dbChipConn bond gap and is not joined by a drawn chip-net
+# segment in the web viewer.
 # Format: bumpInstName  bumpCellType  x  y  portName  netName
 
 bond_NET_A           BUMP         1980.0000    1640.0000 port_BOND_NET_A  NET_A

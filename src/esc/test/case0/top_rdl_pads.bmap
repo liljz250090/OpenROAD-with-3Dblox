@@ -1,5 +1,5 @@
 # Top-RDL landing pads. Each pad is XY-aligned to its bottom package bump.
-# ESC routes on the substrate top RDL from the bond pad to this landing pad.
+# ESC routes on the substrate top RDL from the bond bump to this landing pad.
 # Format: bumpInstName  bumpCellType  x  y  portName  netName
 
 rdl_pad_NET_A        BUMP         3980.0000    1000.0000 port_RDL_PAD_NET_A NET_A

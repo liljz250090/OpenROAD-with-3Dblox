@@ -2,7 +2,7 @@ set case_dir [file join [file dirname [file normalize [info script]]] case0]
 read_3dbx [file join $case_dir top.3dbx]
 
 # Each package net owns four physical endpoints: the die micro-bump, aligned
-# substrate bond pad, top-RDL landing pad, and bottom package bump.
+# substrate bond bump, top-RDL landing pad, and bottom package bump.
 set chip_nets [[ord::get_db] getChipNets]
 if {[llength $chip_nets] != 5} {
   error "expected five package dbChipNets"
