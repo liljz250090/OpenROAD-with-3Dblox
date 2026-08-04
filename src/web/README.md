@@ -167,8 +167,9 @@ web_save_report -setup_paths 200 -hold_paths 200 timing.html
   world coordinates, including rotations and X/Y/Z mirrors. Chip bodies are
   styled by type (`DIE`, `IP`, `SUBSTRATE`, and `RDL`), with physical bumps and
   TSV columns shown when the OpenDB model provides bump sites. Package-level
-  `dbChipNet` bump connectivity is shown as a Manhattan interconnect overlay,
-  controlled by the **Chip Nets** switch.
+  `dbChipNet` connectivity supplies the endpoints for explicit ESC package-RDL
+  routes; the viewer does not invent a temporary Manhattan interconnect before
+  such a route exists. The **Chip Nets** switch controls those explicit routes.
   Clicking a chiplet, bump, TSV, or package interconnect opens its local
   physical properties in the Inspector.
   Chiplet visibility changes in Display Controls are applied immediately to the

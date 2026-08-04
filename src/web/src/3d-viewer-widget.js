@@ -1152,44 +1152,9 @@ export class ThreeDViewerWidget {
         continue;
       }
 
-      if (!Array.isArray(net.terminals) || !Array.isArray(net.segments)) {
-        continue;
-      }
-      for (const segment of net.segments) {
-        const from = net.terminals[segment.from];
-        const to = net.terminals[segment.to];
-        if (!from || !to || !Array.isArray(from.point) || !Array.isArray(to.point)
-            || from.point.length < 3 || to.point.length < 3 || from.tsv
-            || to.tsv || (from.bonded && to.bonded)) {
-          continue;
-        }
-        const fromOffset = this._chipletDisplayZOffset(from.chiplet_path, dbu);
-        const toOffset = this._chipletDisplayZOffset(to.chiplet_path, dbu);
-        const fromPoint = new THREE.Vector3(from.point[0] / dbu,
-                                            from.point[1] / dbu,
-                                            (from.point[2] / dbu) * kZScale
-                                                + fromOffset);
-        const toPoint = new THREE.Vector3(to.point[0] / dbu,
-                                          to.point[1] / dbu,
-                                          (to.point[2] / dbu) * kZScale
-                                              + toOffset);
-        // dbChipNet records endpoints, not detailed RDL tracks.  Use a
-        // Manhattan dogleg at the lower endpoint plane to make that logical
-        // package connection legible while preserving each physical endpoint.
-        const routeZ = Math.min(fromPoint.z, toPoint.z);
-        const viaFrom = new THREE.Vector3(fromPoint.x, fromPoint.y, routeZ);
-        const corner = new THREE.Vector3(toPoint.x, fromPoint.y, routeZ);
-        const viaTo = new THREE.Vector3(toPoint.x, toPoint.y, routeZ);
-        const chipletPaths = [from.chiplet_path, to.chiplet_path];
-        this._addChipNetSegment(fromPoint, viaFrom, radius, material, net,
-                                 chipletPaths);
-        this._addChipNetSegment(viaFrom, corner, radius, material, net,
-                                 chipletPaths);
-        this._addChipNetSegment(corner, viaTo, radius, material, net,
-                                 chipletPaths);
-        this._addChipNetSegment(viaTo, toPoint, radius, material, net,
-                                 chipletPaths);
-      }
+      // dbChipNet describes logical endpoint membership, not physical route
+      // geometry. Do not invent a Manhattan/dogleg path before ESC has
+      // produced an explicit package-RDL polyline for this net.
     }
   }
 

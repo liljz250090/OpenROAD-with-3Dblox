@@ -439,10 +439,10 @@ transformed chip cuboid. No TSV is invented when the chip has no bump sites.
 `chip_type` and master-chip `side`, as well as its fully transformed world-space
 endpoint. `bond_segments` is emitted for XY-aligned die `back` and
 substrate/RDL `front` terminals; it represents the vertical bond interface.
-Because OpenDB `dbChipNet` does not contain detailed router paths, the client
-otherwise renders each endpoint pair as a Manhattan package-interconnect
-overlay. `chip_nets_truncated` is true when the 50,000-segment safety limit is
-reached.
+OpenDB `dbChipNet` does not contain detailed router paths, so the client does
+not render a temporary endpoint-to-endpoint route. It renders a package net
+only when explicit ESC route metadata is present. `chip_nets_truncated` is true
+when the 50,000-segment safety limit is reached.
 
 When the loaded database has `esc_route.<NET>` properties, the matching
 `chip_nets` entry carries a detailed `route` object instead of being rendered
